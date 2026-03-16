@@ -38,4 +38,14 @@ public sealed class SectionControlHelperTests
 
         Assert.Equal("50%", text);
     }
+
+    [Fact]
+    public void AxisFallsBackToX_WhenComboResultIsEmpty()
+    {
+        char axis = SectionControlHelper.NormalizeAxis(string.Empty);
+        bool visible = SectionControlHelper.IsEntityVisible(true, axis, 0.5, 4.0, 0.0, 10.0);
+
+        Assert.Equal('X', axis);
+        Assert.True(visible);
+    }
 }

@@ -17,7 +17,6 @@ using StepParser.Diagnostics;
 using StepParser.Parser;
 
 namespace MBDInspector;
-
 public partial class MainWindow : Window
 {
     private static readonly Regex EntityIdRegex = new(@"#(?<id>\d+)", RegexOptions.Compiled);
@@ -30,9 +29,11 @@ public partial class MainWindow : Window
     private readonly Dictionary<int, EntityListItem> _entityLookup = [];
     private readonly Dictionary<Model3D, int> _faceHitMap = [];
     private readonly HashSet<int> _hiddenEntityIds = [];
+    private readonly DirectionalLight _headLight = new(Color.FromRgb(180, 180, 180), new Vector3D(0, 0, -1));
     private HashSet<int>? _isolatedEntityIds;
     private readonly List<Point3D> _measurementPoints = [];
     private int _loadGeneration;
+    private ModelVisual3D? _headLightVisual;
     private GeometryModel3D? _selectionModel;
     private LinesVisual3D? _selectionLines;
     private LinesVisual3D? _measurementLines;
@@ -49,6 +50,10 @@ public partial class MainWindow : Window
         RuntimeLog.Info("MainWindow constructor entered.");
         InitializeComponent();
         Viewport.Children.Add(new DefaultLights());
+        _headLightVisual = new ModelVisual3D { Content = _headLight };
+        Viewport.Children.Add(_headLightVisual);
+        SyncHeadlightToCamera();
+        Viewport.CameraChanged += (_, _) => SyncHeadlightToCamera();
         UpdateEmptyPanels();
         RuntimeLog.Info("MainWindow initialized.");
     }
@@ -485,7 +490,7 @@ public partial class MainWindow : Window
                     continue;
                 }
 
-                Material material = MakeMaterial(faceMesh.FaceColor, opacity);
+                Material material = MakeMaterial(faceMesh.FaceColor, 1.0, opacity);
                 var model = new GeometryModel3D
                 {
                     Geometry = faceMesh.Mesh,
@@ -929,7 +934,7 @@ public partial class MainWindow : Window
     {
         for (int i = Viewport.Children.Count - 1; i >= 0; i--)
         {
-            if (Viewport.Children[i] is DefaultLights)
+            if (Viewport.Children[i] is DefaultLights || ReferenceEquals(Viewport.Children[i], _headLightVisual))
             {
                 continue;
             }
@@ -1045,12 +1050,12 @@ public partial class MainWindow : Window
             return true;
         }
 
-        char axis = ((SectionAxisComboBox.SelectedItem as ComboBoxItem)?.Content?.ToString() ?? "X")[0];
+        string axisText = (SectionAxisComboBox.SelectedItem as ComboBoxItem)?.Content?.ToString() ?? "X";
+        char axis = SectionControlHelper.NormalizeAxis(axisText);
         double value = GetAxisValue(center, axis);
         double min = centers.Min(point => GetAxisValue(point, axis));
         double max = centers.Max(point => GetAxisValue(point, axis));
-        double threshold = min + ((max - min) * (SectionSlider.Value / 100.0));
-        return value <= threshold;
+        return SectionControlHelper.IsEntityVisible(true, axis, SectionSlider.Value / 100.0, value, min, max);
     }
 
     private void RerenderIfLoaded()
@@ -1213,21 +1218,51 @@ public partial class MainWindow : Window
         _ => point.X
     };
 
-    private static Material MakeMaterial(Color? faceColor, double opacity)
+    internal static Material MakeMaterial(Color? faceColor, double faceOpacity, double sliderOpacity)
     {
         Color baseColor = faceColor ?? DefaultFaceColor;
-        byte alpha = (byte)Math.Clamp(opacity * 255, 0, 255);
+        double effectiveOpacity = Math.Clamp(faceOpacity * sliderOpacity, 0.0, 1.0);
+        byte alpha = (byte)Math.Clamp(effectiveOpacity * 255, 0, 255);
+        byte emissiveRed = (byte)(baseColor.R * 0.35);
+        byte emissiveGreen = (byte)(baseColor.G * 0.35);
+        byte emissiveBlue = (byte)(baseColor.B * 0.35);
+
+        var emissive = new SolidColorBrush(Color.FromArgb(alpha, emissiveRed, emissiveGreen, emissiveBlue));
         var diffuse = new SolidColorBrush(Color.FromArgb(alpha, baseColor.R, baseColor.G, baseColor.B));
-        var specular = new SolidColorBrush(Color.FromArgb((byte)(alpha * 200 / 255), 255, 255, 255));
+        var specular = new SolidColorBrush(Color.FromArgb(alpha, 255, 255, 255));
+        emissive.Freeze();
+        diffuse.Freeze();
+        specular.Freeze();
 
         return new MaterialGroup
         {
             Children =
             {
+                new EmissiveMaterial(emissive),
                 new DiffuseMaterial(diffuse),
                 new SpecularMaterial(specular, 60)
             }
         };
+    }
+
+    private void SyncHeadlightToCamera()
+    {
+        if (Viewport.Camera is not ProjectionCamera camera)
+        {
+            return;
+        }
+
+        Vector3D direction = camera.LookDirection;
+        if (direction.Length < 1e-10)
+        {
+            direction = new Vector3D(0, 0, -1);
+        }
+        else
+        {
+            direction.Normalize();
+        }
+
+        _headLight.Direction = direction;
     }
 
     private static KeyValuePair<string, string> KV(string key, string value) => new(key, value);

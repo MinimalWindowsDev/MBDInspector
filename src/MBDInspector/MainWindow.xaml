@@ -10,7 +10,6 @@
         DragOver="Window_DragOver"
         Closing="Window_Closing"
         Loaded="Window_Loaded">
-
     <Window.Resources>
         <DataTemplate x:Key="KeyValueTemplate">
             <Grid Margin="0,2">

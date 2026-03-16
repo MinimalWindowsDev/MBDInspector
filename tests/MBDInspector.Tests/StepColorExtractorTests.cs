@@ -1,5 +1,7 @@
 using System.Collections.Generic;
+using System.Linq;
 using System.Windows.Media;
+using System.Windows.Media.Media3D;
 using StepParser.Parser;
 using Xunit;
 
@@ -49,5 +51,19 @@ public sealed class StepColorExtractorTests
         Dictionary<int, Color> colors = StepColorExtractor.Extract(data);
 
         Assert.Equal(Colors.Red, colors[1]);
+    }
+
+    [Fact]
+    public void MakeMaterial_EmissiveFloor_IsNeverBlack()
+    {
+        Material material = MainWindow.MakeMaterial(Color.FromRgb(64, 64, 64), 1.0, 1.0);
+
+        MaterialGroup group = Assert.IsType<MaterialGroup>(material);
+        EmissiveMaterial emissive = Assert.IsType<EmissiveMaterial>(group.Children.Single(child => child is EmissiveMaterial));
+        SolidColorBrush brush = Assert.IsType<SolidColorBrush>(emissive.Brush);
+
+        Assert.True(brush.Color.R > 0);
+        Assert.True(brush.Color.G > 0);
+        Assert.True(brush.Color.B > 0);
     }
 }
