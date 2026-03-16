@@ -8,29 +8,42 @@
         Drop="Window_Drop"
         DragOver="Window_DragOver">
 
-    <Window.InputBindings>
-        <KeyBinding Key="O" Modifiers="Ctrl" Command="{Binding OpenCommand, RelativeSource={RelativeSource AncestorType=Window}}" />
-    </Window.InputBindings>
-
     <DockPanel>
 
         <!-- Menu -->
         <Menu DockPanel.Dock="Top">
             <MenuItem Header="_File">
-                <MenuItem Header="_Open…" Click="Open_Click" InputGestureText="Ctrl+O" />
+                <MenuItem Header="_Open…"   Click="Open_Click"  InputGestureText="Ctrl+O" />
                 <Separator />
-                <MenuItem Header="E_xit" Click="Exit_Click" />
+                <MenuItem Header="E_xit"    Click="Exit_Click" />
             </MenuItem>
             <MenuItem Header="_View">
-                <MenuItem Header="Fit _All" Click="FitAll_Click" InputGestureText="F" />
-                <MenuItem Header="Reset _Camera" Click="ResetCamera_Click" InputGestureText="Home" />
+                <MenuItem Header="Fit _All"       Click="FitAll_Click"      InputGestureText="F" />
+                <MenuItem Header="Reset _Camera"  Click="ResetCamera_Click" InputGestureText="Home" />
             </MenuItem>
         </Menu>
+
+        <!-- Render-mode toolbar -->
+        <ToolBar DockPanel.Dock="Top" Background="#F0F0F0">
+            <TextBlock Text="Render:" VerticalAlignment="Center" Margin="4,0,6,0" Foreground="#555"/>
+            <RadioButton x:Name="ModeWireframe"  Content="Wireframe"    GroupName="mode" Margin="2,0"
+                         Checked="RenderMode_Changed" IsChecked="False"/>
+            <RadioButton x:Name="ModeSolid"      Content="Solid"        GroupName="mode" Margin="2,0"
+                         Checked="RenderMode_Changed" IsChecked="False"/>
+            <RadioButton x:Name="ModeSolidEdges" Content="Solid + Edges" GroupName="mode" Margin="2,0"
+                         Checked="RenderMode_Changed" IsChecked="True"/>
+            <Separator/>
+            <TextBlock Text="Opacity:" VerticalAlignment="Center" Margin="4,0,4,0" Foreground="#555"/>
+            <Slider x:Name="OpacitySlider" Width="80" Minimum="0.1" Maximum="1.0" Value="1.0"
+                    VerticalAlignment="Center"
+                    ValueChanged="Opacity_Changed"/>
+        </ToolBar>
 
         <!-- Status bar -->
         <StatusBar DockPanel.Dock="Bottom">
             <StatusBarItem>
-                <TextBlock x:Name="StatusText" Text="Open a STEP file to begin — Ctrl+O or drag and drop" />
+                <TextBlock x:Name="StatusText"
+                           Text="Open a STEP file — Ctrl+O or drag and drop" />
             </StatusBarItem>
         </StatusBar>
 
@@ -56,23 +69,17 @@
                                     <ColumnDefinition Width="80" />
                                     <ColumnDefinition Width="*" />
                                 </Grid.ColumnDefinitions>
-                                <TextBlock Text="{Binding Key}"
-                                           Foreground="#888"
-                                           FontSize="11" />
-                                <TextBlock Grid.Column="1"
-                                           Text="{Binding Value}"
-                                           FontSize="11"
-                                           TextWrapping="Wrap" />
+                                <TextBlock Text="{Binding Key}"  Foreground="#888" FontSize="11" />
+                                <TextBlock Grid.Column="1" Text="{Binding Value}"
+                                           FontSize="11" TextWrapping="Wrap" />
                             </Grid>
                         </DataTemplate>
                     </ItemsControl.ItemTemplate>
                 </ItemsControl>
             </DockPanel>
 
-            <GridSplitter Grid.Column="1"
-                          Width="5"
-                          HorizontalAlignment="Stretch"
-                          Background="#DDD" />
+            <GridSplitter Grid.Column="1" Width="5"
+                          HorizontalAlignment="Stretch" Background="#DDD" />
 
             <!-- 3D viewport -->
             <helix:HelixViewport3D x:Name="Viewport"
