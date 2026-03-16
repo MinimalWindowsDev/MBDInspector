@@ -7,330 +7,512 @@ using StepParser.Parser;
 
 namespace MBDInspector;
 
-/// <summary>
-/// Walks the STEP B-rep hierarchy and produces triangulated solid geometry.
-///
-/// Strategy per ADVANCED_FACE:
-///   1. Resolve FACE_OUTER_BOUND → EDGE_LOOP → ORIENTED_EDGE → EDGE_CURVE chain.
-///   2. Sample each edge curve (LINE=endpoints, CIRCLE/ELLIPSE=32pts,
-///      B_SPLINE=control polygon, others=endpoints).
-///   3. Fan-triangulate the resulting boundary polygon from its centroid.
-///   4. Compute the face normal from the surface entity when it is a PLANE,
-///      otherwise from the first non-degenerate polygon triple.
-/// </summary>
 public static class StepTessellator
 {
     private const int CircleSamples = 32;
+    private static readonly Color NoColor = Color.FromArgb(0, 0, 0, 0);
 
-    // ── Public API ───────────────────────────────────────────────────────
-
-    /// <summary>
-    /// Returns one flat-shaded MeshGeometry3D containing every tessellated face.
-    /// Vertices are NOT shared between faces so per-face flat normals are preserved.
-    /// </summary>
-    public static MeshGeometry3D Tessellate(IReadOnlyDictionary<int, EntityInstance> data)
+    public static List<(MeshGeometry3D Mesh, Color? FaceColor)> Tessellate(
+        IReadOnlyDictionary<int, EntityInstance> data,
+        IReadOnlyDictionary<int, Color>? colorMap = null)
     {
-        var positions = new Point3DCollection();
-        var normals   = new Vector3DCollection();
-        var indices   = new Int32Collection();
+        List<FaceMeshItem> faceMeshes = TessellateFaces(data, colorMap);
+        var buckets = new Dictionary<Color, (List<Point3D> Positions, List<int> Indices)>();
 
-        foreach (var (_, entity) in data)
+        foreach (FaceMeshItem faceMesh in faceMeshes)
         {
-            if (!IsNamed(entity, "ADVANCED_FACE")) continue;
-            if (entity.Parameters.Count < 4) continue;
+            Color colorKey = faceMesh.FaceColor ?? NoColor;
 
-            // param[1]: list of face bounds, param[2]: surface, param[3]: same_sense
-            if (entity.Parameters[1] is not Parameter.ListValue boundsParam) continue;
-
-            bool sameSense = entity.Parameters[3] is not Parameter.EnumValue ev
-                             || !string.Equals(ev.Name, "F", StringComparison.OrdinalIgnoreCase);
-
-            // Compute surface normal from the surface entity if possible
-            Vector3D? surfaceNormal = ResolveSurfaceNormal(entity.Parameters[2], data);
-
-            // Walk each face bound; collect the outer boundary polygon
-            foreach (Parameter boundRef in boundsParam.Items)
+            if (!buckets.TryGetValue(colorKey, out var bucket))
             {
-                if (boundRef is not Parameter.EntityReference bref) continue;
-                if (!data.TryGetValue(bref.Id, out EntityInstance? bound)) continue;
-                if (bound.Parameters.Count < 2) continue;
-                if (bound.Parameters[1] is not Parameter.EntityReference loopRef) continue;
+                bucket = (new List<Point3D>(), new List<int>());
+                buckets[colorKey] = bucket;
+            }
 
-                List<Point3D> polygon = SampleEdgeLoop(loopRef.Id, data);
-                if (polygon.Count < 3) continue;
+            int baseIndex = bucket.Positions.Count;
+            bucket.Positions.AddRange(faceMesh.Mesh.Positions);
+            bucket.Indices.AddRange(faceMesh.Mesh.TriangleIndices.Select(index => index + baseIndex));
+        }
 
-                Vector3D normal = surfaceNormal
-                    ?? ComputePolygonNormal(polygon);
+        var result = new List<(MeshGeometry3D Mesh, Color? FaceColor)>(buckets.Count);
+        foreach ((Color colorKey, (List<Point3D> positions, List<int> indices)) in buckets)
+        {
+            if (positions.Count == 0)
+            {
+                continue;
+            }
 
-                if (!sameSense) normal = -normal;
+            result.Add((new MeshGeometry3D
+            {
+                Positions = new Point3DCollection(positions),
+                TriangleIndices = new Int32Collection(indices)
+            }, colorKey == NoColor ? null : colorKey));
+        }
 
-                // Fan-triangulate from centroid
-                Point3D centroid = Centroid(polygon);
-                int base0 = positions.Count;
+        return result;
+    }
 
-                for (int i = 0; i < polygon.Count; i++)
+    internal static List<FaceMeshItem> TessellateFaces(
+        IReadOnlyDictionary<int, EntityInstance> data,
+        IReadOnlyDictionary<int, Color>? colorMap = null)
+    {
+        var result = new List<FaceMeshItem>();
+        foreach (var (faceId, entity) in data)
+        {
+            if (!TryBuildFaceGeometry(entity, data, out List<Point3D>? positions, out List<int>? indices, out _))
+            {
+                continue;
+            }
+
+            Color? faceColor = colorMap is not null && colorMap.TryGetValue(faceId, out Color color)
+                ? color
+                : null;
+
+            result.Add(new FaceMeshItem(
+                faceId,
+                new MeshGeometry3D
                 {
-                    int next = (i + 1) % polygon.Count;
+                    Positions = new Point3DCollection(positions!),
+                    TriangleIndices = new Int32Collection(indices!)
+                },
+                faceColor));
+        }
 
-                    int i0 = positions.Count;
-                    positions.Add(centroid);
-                    normals.Add(normal);
+        return result;
+    }
 
-                    positions.Add(polygon[i]);
-                    normals.Add(normal);
+    public static bool TryTessellateFace(
+        int faceId,
+        IReadOnlyDictionary<int, EntityInstance> data,
+        out MeshGeometry3D? mesh)
+    {
+        mesh = null;
+        if (!data.TryGetValue(faceId, out EntityInstance? entity) ||
+            !TryBuildFaceGeometry(entity, data, out List<Point3D>? positions, out List<int>? indices, out _))
+        {
+            return false;
+        }
 
-                    positions.Add(polygon[next]);
-                    normals.Add(normal);
+        mesh = new MeshGeometry3D
+        {
+            Positions = new Point3DCollection(positions!),
+            TriangleIndices = new Int32Collection(indices!)
+        };
+        return true;
+    }
 
-                    indices.Add(i0);
-                    indices.Add(i0 + 1);
-                    indices.Add(i0 + 2);
-                }
+    public static bool TryExtractFaceOutline(
+        int faceId,
+        IReadOnlyDictionary<int, EntityInstance> data,
+        out IReadOnlyList<Point3D> outline)
+    {
+        outline = Array.Empty<Point3D>();
+        if (!data.TryGetValue(faceId, out EntityInstance? entity) ||
+            !TryGetFacePolygon(entity, data, out List<Point3D>? polygon, out _))
+        {
+            return false;
+        }
 
-                break; // one outer boundary per face
+        outline = polygon!;
+        return true;
+    }
+
+    private static bool TryBuildFaceGeometry(
+        EntityInstance entity,
+        IReadOnlyDictionary<int, EntityInstance> data,
+        out List<Point3D>? positions,
+        out List<int>? indices,
+        out List<Point3D>? polygon)
+    {
+        positions = null;
+        indices = null;
+        polygon = null;
+
+        if (!TryGetFacePolygon(entity, data, out polygon, out bool sameSense))
+        {
+            return false;
+        }
+
+        Vector3D desiredNormal = ResolveSurfaceNormal(entity.Parameters[2], data) ?? ComputePolygonNormal(polygon!);
+        if (!sameSense)
+        {
+            desiredNormal = -desiredNormal;
+        }
+
+        positions = [];
+        indices = [];
+        AddFanTriangles(polygon!, desiredNormal, positions, indices);
+        return positions.Count > 0;
+    }
+
+    private static bool TryGetFacePolygon(
+        EntityInstance entity,
+        IReadOnlyDictionary<int, EntityInstance> data,
+        out List<Point3D>? polygon,
+        out bool sameSense)
+    {
+        polygon = null;
+        sameSense = true;
+
+        if (!IsNamed(entity, "ADVANCED_FACE") ||
+            entity.Parameters.Count < 4 ||
+            entity.Parameters[1] is not Parameter.ListValue boundsParam)
+        {
+            return false;
+        }
+
+        sameSense = entity.Parameters[3] is not Parameter.EnumValue enumValue
+                     || !string.Equals(enumValue.Name, "F", StringComparison.OrdinalIgnoreCase);
+
+        foreach (Parameter boundRef in boundsParam.Items)
+        {
+            if (boundRef is not Parameter.EntityReference boundaryReference ||
+                !data.TryGetValue(boundaryReference.Id, out EntityInstance? bound) ||
+                bound.Parameters.Count < 2 ||
+                bound.Parameters[1] is not Parameter.EntityReference loopRef)
+            {
+                continue;
+            }
+
+            polygon = SampleEdgeLoop(loopRef.Id, data);
+            if (polygon.Count >= 3)
+            {
+                return true;
             }
         }
 
-        return new MeshGeometry3D
-        {
-            Positions      = positions,
-            Normals        = normals,
-            TriangleIndices = indices
-        };
+        return false;
     }
 
-    // ── Surface normal ────────────────────────────────────────────────────
+    private static void AddFanTriangles(
+        List<Point3D> polygon,
+        Vector3D desiredNormal,
+        List<Point3D> positions,
+        List<int> indices)
+    {
+        Point3D centroid = Centroid(polygon);
+        bool normalIsValid = desiredNormal.Length > 1e-10;
+
+        for (int i = 0; i < polygon.Count; i++)
+        {
+            Point3D p1 = polygon[i];
+            Point3D p2 = polygon[(i + 1) % polygon.Count];
+
+            if (normalIsValid)
+            {
+                Vector3D autoNormal = Vector3D.CrossProduct(p1 - centroid, p2 - centroid);
+                if (Vector3D.DotProduct(autoNormal, desiredNormal) < 0)
+                {
+                    (p1, p2) = (p2, p1);
+                }
+            }
+
+            int baseIndex = positions.Count;
+            positions.Add(centroid);
+            positions.Add(p1);
+            positions.Add(p2);
+            indices.Add(baseIndex);
+            indices.Add(baseIndex + 1);
+            indices.Add(baseIndex + 2);
+        }
+    }
 
     private static Vector3D? ResolveSurfaceNormal(
-        Parameter surfaceParam, IReadOnlyDictionary<int, EntityInstance> data)
+        Parameter surfaceParam,
+        IReadOnlyDictionary<int, EntityInstance> data)
     {
-        if (surfaceParam is not Parameter.EntityReference sref) return null;
-        if (!data.TryGetValue(sref.Id, out EntityInstance? surface)) return null;
+        if (surfaceParam is not Parameter.EntityReference entityReference ||
+            !data.TryGetValue(entityReference.Id, out EntityInstance? surface))
+        {
+            return null;
+        }
 
         if (IsNamed(surface, "PLANE"))
         {
-            if (surface.Parameters.Count < 2) return null;
-            var (_, z, _) = ResolveAxis2(surface.Parameters[1], data);
+            if (surface.Parameters.Count < 2)
+            {
+                return null;
+            }
+
+            (_, Vector3D z, _) = ResolveAxis2(surface.Parameters[1], data);
             return z == default ? null : z;
         }
 
-        return null; // other surface types: derive from polygon winding
+        return null;
     }
 
-    // ── Edge loop / curve sampling ────────────────────────────────────────
-
     private static List<Point3D> SampleEdgeLoop(
-        int loopId, IReadOnlyDictionary<int, EntityInstance> data)
+        int loopId,
+        IReadOnlyDictionary<int, EntityInstance> data)
     {
-        if (!data.TryGetValue(loopId, out EntityInstance? loop)) return [];
-        if (!IsNamed(loop, "EDGE_LOOP")) return [];
-        if (loop.Parameters.Count < 2) return [];
-        if (loop.Parameters[1] is not Parameter.ListValue edgeList) return [];
+        if (!data.TryGetValue(loopId, out EntityInstance? loop) ||
+            !IsNamed(loop, "EDGE_LOOP") ||
+            loop.Parameters.Count < 2 ||
+            loop.Parameters[1] is not Parameter.ListValue edgeList)
+        {
+            return [];
+        }
 
         var result = new List<Point3D>();
         foreach (Parameter edgeRef in edgeList.Items)
         {
-            if (edgeRef is not Parameter.EntityReference eref) continue;
-            if (!data.TryGetValue(eref.Id, out EntityInstance? oe)) continue;
-            if (!IsNamed(oe, "ORIENTED_EDGE")) continue;
-            if (oe.Parameters.Count < 5) continue;
-            if (oe.Parameters[3] is not Parameter.EntityReference curveRef) continue;
+            if (edgeRef is not Parameter.EntityReference entityReference ||
+                !data.TryGetValue(entityReference.Id, out EntityInstance? orientedEdge) ||
+                !IsNamed(orientedEdge, "ORIENTED_EDGE") ||
+                orientedEdge.Parameters.Count < 5 ||
+                orientedEdge.Parameters[3] is not Parameter.EntityReference curveRef)
+            {
+                continue;
+            }
 
-            bool forward = oe.Parameters[4] is not Parameter.EnumValue ev
-                           || !string.Equals(ev.Name, "F", StringComparison.OrdinalIgnoreCase);
+            bool forward = orientedEdge.Parameters[4] is not Parameter.EnumValue enumValue
+                           || !string.Equals(enumValue.Name, "F", StringComparison.OrdinalIgnoreCase);
 
-            List<Point3D> pts = SampleEdgeCurve(curveRef.Id, data);
-            if (!forward) pts.Reverse();
+            List<Point3D> points = SampleEdgeCurve(curveRef.Id, data);
+            if (!forward)
+            {
+                points.Reverse();
+            }
 
-            // Skip first point if it duplicates the last already added
-            int skip = result.Count > 0 && pts.Count > 0
-                       && (pts[0] - result[^1]).Length < 1e-6 ? 1 : 0;
-
-            result.AddRange(pts.Skip(skip));
+            int skip = result.Count > 0 && points.Count > 0 && (points[0] - result[^1]).Length < 1e-6 ? 1 : 0;
+            result.AddRange(points.Skip(skip));
         }
 
-        // Remove closing duplicate
         if (result.Count > 1 && (result[0] - result[^1]).Length < 1e-6)
+        {
             result.RemoveAt(result.Count - 1);
+        }
 
         return result;
     }
 
     private static List<Point3D> SampleEdgeCurve(
-        int id, IReadOnlyDictionary<int, EntityInstance> data)
+        int id,
+        IReadOnlyDictionary<int, EntityInstance> data)
     {
-        if (!data.TryGetValue(id, out EntityInstance? ec)) return [];
-        if (!IsNamed(ec, "EDGE_CURVE")) return [];
-        if (ec.Parameters.Count < 4) return [];
+        if (!data.TryGetValue(id, out EntityInstance? edgeCurve) ||
+            !IsNamed(edgeCurve, "EDGE_CURVE") ||
+            edgeCurve.Parameters.Count < 4)
+        {
+            return [];
+        }
 
-        Point3D? start = ResolveVertex(ec.Parameters[1], data);
-        Point3D? end   = ResolveVertex(ec.Parameters[2], data);
+        Point3D? start = ResolveVertex(edgeCurve.Parameters[1], data);
+        Point3D? end = ResolveVertex(edgeCurve.Parameters[2], data);
 
-        if (ec.Parameters[3] is not Parameter.EntityReference geomRef)
+        if (edgeCurve.Parameters[3] is not Parameter.EntityReference geometryReference ||
+            !data.TryGetValue(geometryReference.Id, out EntityInstance? geometry))
+        {
             return Compact([start, end]);
+        }
 
-        if (!data.TryGetValue(geomRef.Id, out EntityInstance? geom))
-            return Compact([start, end]);
-
-        return SampleCurve(geom, start, end, data);
+        return SampleCurve(geometry, start, end, data);
     }
 
     private static List<Point3D> SampleCurve(
-        EntityInstance geom, Point3D? start, Point3D? end,
+        EntityInstance geometry,
+        Point3D? start,
+        Point3D? end,
         IReadOnlyDictionary<int, EntityInstance> data)
     {
-        if (IsNamed(geom, "LINE"))
+        if (IsNamed(geometry, "LINE"))
+        {
             return Compact([start, end]);
+        }
 
-        if (IsNamed(geom, "CIRCLE"))
-            return SampleCircle(geom, start, end, data);
+        if (IsNamed(geometry, "CIRCLE"))
+        {
+            return SampleCircle(geometry, start, end, data);
+        }
 
-        if (IsNamed(geom, "ELLIPSE"))
-            return SampleEllipse(geom, start, end, data);
+        if (IsNamed(geometry, "ELLIPSE"))
+        {
+            return SampleEllipse(geometry, start, end, data);
+        }
 
-        if (IsNamed(geom, "B_SPLINE_CURVE_WITH_KNOTS") ||
-            IsNamed(geom, "B_SPLINE_CURVE") ||
-            IsNamed(geom, "RATIONAL_B_SPLINE_CURVE"))
-            return SampleBSpline(geom, start, end, data);
+        if (IsNamed(geometry, "B_SPLINE_CURVE_WITH_KNOTS") ||
+            IsNamed(geometry, "B_SPLINE_CURVE") ||
+            IsNamed(geometry, "RATIONAL_B_SPLINE_CURVE"))
+        {
+            return SampleBSpline(geometry, start, end, data);
+        }
 
         return Compact([start, end]);
     }
 
-    // ── Curve samplers ────────────────────────────────────────────────────
-
     private static List<Point3D> SampleCircle(
-        EntityInstance circle, Point3D? start, Point3D? end,
+        EntityInstance circle,
+        Point3D? start,
+        Point3D? end,
         IReadOnlyDictionary<int, EntityInstance> data)
     {
-        if (circle.Parameters.Count < 3) return Compact([start, end]);
+        if (circle.Parameters.Count < 3)
+        {
+            return Compact([start, end]);
+        }
 
         double radius = ToDouble(circle.Parameters[2]);
-        if (radius <= 0) return Compact([start, end]);
+        if (radius <= 0)
+        {
+            return Compact([start, end]);
+        }
 
-        var (center, zDir, xDir) = ResolveAxis2(circle.Parameters[1], data);
-        if (xDir == default) return Compact([start, end]);
+        (Point3D center, Vector3D zDirection, Vector3D xDirection) = ResolveAxis2(circle.Parameters[1], data);
+        if (xDirection == default)
+        {
+            return Compact([start, end]);
+        }
 
-        Vector3D yDir = Vector3D.CrossProduct(zDir, xDir);
-        yDir.Normalize();
+        Vector3D yDirection = Vector3D.CrossProduct(zDirection, xDirection);
+        yDirection.Normalize();
 
-        bool fullCircle = start == null || end == null ||
-                          (start.Value - end.Value).Length < 1e-6;
-
-        double t0 = 0, t1 = 2 * Math.PI;
+        bool fullCircle = start is null || end is null || (start.Value - end.Value).Length < 1e-6;
+        double t0 = 0;
+        double t1 = 2 * Math.PI;
         if (!fullCircle)
         {
-            t0 = AngleOnCircle(start!.Value - center, xDir, yDir);
-            t1 = AngleOnCircle(end!.Value   - center, xDir, yDir);
-            if (t1 <= t0) t1 += 2 * Math.PI;
+            t0 = AngleOnCircle(start!.Value - center, xDirection, yDirection);
+            t1 = AngleOnCircle(end!.Value - center, xDirection, yDirection);
+            if (t1 <= t0)
+            {
+                t1 += 2 * Math.PI;
+            }
         }
 
-        int n = fullCircle ? CircleSamples
-              : Math.Max(4, (int)(Math.Abs(t1 - t0) / (2 * Math.PI) * CircleSamples));
+        int sampleCount = fullCircle
+            ? CircleSamples
+            : Math.Max(4, (int)(Math.Abs(t1 - t0) / (2 * Math.PI) * CircleSamples));
 
-        var pts = new List<Point3D>(n + 1);
-        for (int i = 0; i <= n; i++)
+        var points = new List<Point3D>(sampleCount + 1);
+        for (int i = 0; i <= sampleCount; i++)
         {
-            double t = t0 + (t1 - t0) * i / n;
-            pts.Add(center + xDir * (radius * Math.Cos(t)) + yDir * (radius * Math.Sin(t)));
+            double t = t0 + (t1 - t0) * i / sampleCount;
+            points.Add(center + xDirection * (radius * Math.Cos(t)) + yDirection * (radius * Math.Sin(t)));
         }
-        return pts;
+
+        return points;
     }
 
     private static List<Point3D> SampleEllipse(
-        EntityInstance ellipse, Point3D? start, Point3D? end,
+        EntityInstance ellipse,
+        Point3D? start,
+        Point3D? end,
         IReadOnlyDictionary<int, EntityInstance> data)
     {
-        // ELLIPSE('', #axis2, semi_axis1, semi_axis2)
-        if (ellipse.Parameters.Count < 4) return Compact([start, end]);
+        if (ellipse.Parameters.Count < 4)
+        {
+            return Compact([start, end]);
+        }
 
-        double a = ToDouble(ellipse.Parameters[2]);
-        double b = ToDouble(ellipse.Parameters[3]);
-        if (a <= 0 || b <= 0) return Compact([start, end]);
+        double semiAxis1 = ToDouble(ellipse.Parameters[2]);
+        double semiAxis2 = ToDouble(ellipse.Parameters[3]);
+        if (semiAxis1 <= 0 || semiAxis2 <= 0)
+        {
+            return Compact([start, end]);
+        }
 
-        var (center, zDir, xDir) = ResolveAxis2(ellipse.Parameters[1], data);
-        if (xDir == default) return Compact([start, end]);
+        (Point3D center, Vector3D zDirection, Vector3D xDirection) = ResolveAxis2(ellipse.Parameters[1], data);
+        if (xDirection == default)
+        {
+            return Compact([start, end]);
+        }
 
-        Vector3D yDir = Vector3D.CrossProduct(zDir, xDir);
-        yDir.Normalize();
+        Vector3D yDirection = Vector3D.CrossProduct(zDirection, xDirection);
+        yDirection.Normalize();
 
-        bool fullEllipse = start == null || end == null ||
-                           (start.Value - end.Value).Length < 1e-6;
-
-        double t0 = 0, t1 = 2 * Math.PI;
+        bool fullEllipse = start is null || end is null || (start.Value - end.Value).Length < 1e-6;
+        double t0 = 0;
+        double t1 = 2 * Math.PI;
         if (!fullEllipse)
         {
-            t0 = AngleOnCircle(start!.Value - center, xDir, yDir);
-            t1 = AngleOnCircle(end!.Value   - center, xDir, yDir);
-            if (t1 <= t0) t1 += 2 * Math.PI;
+            t0 = AngleOnCircle(start!.Value - center, xDirection, yDirection);
+            t1 = AngleOnCircle(end!.Value - center, xDirection, yDirection);
+            if (t1 <= t0)
+            {
+                t1 += 2 * Math.PI;
+            }
         }
 
-        int n = CircleSamples;
-        var pts = new List<Point3D>(n + 1);
-        for (int i = 0; i <= n; i++)
+        var points = new List<Point3D>(CircleSamples + 1);
+        for (int i = 0; i <= CircleSamples; i++)
         {
-            double t = t0 + (t1 - t0) * i / n;
-            pts.Add(center + xDir * (a * Math.Cos(t)) + yDir * (b * Math.Sin(t)));
+            double t = t0 + (t1 - t0) * i / CircleSamples;
+            points.Add(center + xDirection * (semiAxis1 * Math.Cos(t)) + yDirection * (semiAxis2 * Math.Sin(t)));
         }
-        return pts;
+
+        return points;
     }
 
     private static List<Point3D> SampleBSpline(
-        EntityInstance bspline, Point3D? start, Point3D? end,
+        EntityInstance bspline,
+        Point3D? start,
+        Point3D? end,
         IReadOnlyDictionary<int, EntityInstance> data)
     {
-        // B_SPLINE_CURVE_WITH_KNOTS('', degree, (#cp ...), form, closed, self_int, mults, knots, spec)
-        // Index 2 = control points list
-        if (bspline.Parameters.Count < 3) return Compact([start, end]);
-        if (bspline.Parameters[2] is not Parameter.ListValue cpList)
-            return Compact([start, end]);
-
-        var pts = new List<Point3D>();
-        foreach (Parameter cpRef in cpList.Items)
+        if (bspline.Parameters.Count < 3 || bspline.Parameters[2] is not Parameter.ListValue controlPoints)
         {
-            Point3D? pt = ResolveCartesianPointParam(cpRef, data);
-            if (pt.HasValue) pts.Add(pt.Value);
+            return Compact([start, end]);
         }
 
-        return pts.Count >= 2 ? pts : Compact([start, end]);
+        var points = new List<Point3D>();
+        foreach (Parameter controlPointReference in controlPoints.Items)
+        {
+            Point3D? point = ResolveCartesianPointParam(controlPointReference, data);
+            if (point.HasValue)
+            {
+                points.Add(point.Value);
+            }
+        }
+
+        return points.Count >= 2 ? points : Compact([start, end]);
     }
 
-    // ── Entity resolution helpers ─────────────────────────────────────────
-
-    private static (Point3D center, Vector3D z, Vector3D x) ResolveAxis2(
-        Parameter param, IReadOnlyDictionary<int, EntityInstance> data)
+    private static (Point3D Center, Vector3D Z, Vector3D X) ResolveAxis2(
+        Parameter param,
+        IReadOnlyDictionary<int, EntityInstance> data)
     {
-        if (param is not Parameter.EntityReference eref) return default;
-        if (!data.TryGetValue(eref.Id, out EntityInstance? axis)) return default;
-
-        // AXIS2_PLACEMENT_3D('', #location, #axis_dir, #ref_dir)
-        if (axis.Parameters.Count < 4) return default;
+        if (param is not Parameter.EntityReference entityReference ||
+            !data.TryGetValue(entityReference.Id, out EntityInstance? axis) ||
+            axis.Parameters.Count < 4)
+        {
+            return default;
+        }
 
         Point3D? center = ResolveCartesianPointParam(axis.Parameters[1], data);
         Vector3D z = ResolveDirectionParam(axis.Parameters[2], data);
         Vector3D x = ResolveDirectionParam(axis.Parameters[3], data);
-
         return (center ?? default, z, x);
     }
 
     private static Point3D? ResolveVertex(
-        Parameter param, IReadOnlyDictionary<int, EntityInstance> data)
+        Parameter param,
+        IReadOnlyDictionary<int, EntityInstance> data)
     {
-        if (param is not Parameter.EntityReference eref) return null;
-        if (!data.TryGetValue(eref.Id, out EntityInstance? vp)) return null;
-        if (!IsNamed(vp, "VERTEX_POINT")) return null;
-        if (vp.Parameters.Count < 2) return null;
-        return ResolveCartesianPointParam(vp.Parameters[1], data);
+        if (param is not Parameter.EntityReference entityReference ||
+            !data.TryGetValue(entityReference.Id, out EntityInstance? vertexPoint) ||
+            !IsNamed(vertexPoint, "VERTEX_POINT") ||
+            vertexPoint.Parameters.Count < 2)
+        {
+            return null;
+        }
+
+        return ResolveCartesianPointParam(vertexPoint.Parameters[1], data);
     }
 
     private static Point3D? ResolveCartesianPointParam(
-        Parameter param, IReadOnlyDictionary<int, EntityInstance> data)
+        Parameter param,
+        IReadOnlyDictionary<int, EntityInstance> data)
     {
-        if (param is not Parameter.EntityReference eref) return null;
-        if (!data.TryGetValue(eref.Id, out EntityInstance? cp)) return null;
-        if (!IsNamed(cp, "CARTESIAN_POINT")) return null;
-        if (cp.Parameters.Count < 2) return null;
-        if (cp.Parameters[1] is not Parameter.ListValue coords) return null;
-        if (coords.Items.Count < 2) return null;
+        if (param is not Parameter.EntityReference entityReference ||
+            !data.TryGetValue(entityReference.Id, out EntityInstance? point) ||
+            !IsNamed(point, "CARTESIAN_POINT") ||
+            point.Parameters.Count < 2 ||
+            point.Parameters[1] is not Parameter.ListValue coords ||
+            coords.Items.Count < 2)
+        {
+            return null;
+        }
+
         double x = ToDouble(coords.Items[0]);
         double y = ToDouble(coords.Items[1]);
         double z = coords.Items.Count >= 3 ? ToDouble(coords.Items[2]) : 0.0;
@@ -338,63 +520,76 @@ public static class StepTessellator
     }
 
     private static Vector3D ResolveDirectionParam(
-        Parameter param, IReadOnlyDictionary<int, EntityInstance> data)
+        Parameter param,
+        IReadOnlyDictionary<int, EntityInstance> data)
     {
-        if (param is not Parameter.EntityReference eref) return default;
-        if (!data.TryGetValue(eref.Id, out EntityInstance? dir)) return default;
-        if (!IsNamed(dir, "DIRECTION")) return default;
-        if (dir.Parameters.Count < 2) return default;
-        if (dir.Parameters[1] is not Parameter.ListValue coords) return default;
-        if (coords.Items.Count < 3) return default;
-        double x = ToDouble(coords.Items[0]);
-        double y = ToDouble(coords.Items[1]);
-        double z = ToDouble(coords.Items[2]);
-        var v = new Vector3D(x, y, z);
-        v.Normalize();
-        return v;
-    }
+        if (param is not Parameter.EntityReference entityReference ||
+            !data.TryGetValue(entityReference.Id, out EntityInstance? direction) ||
+            !IsNamed(direction, "DIRECTION") ||
+            direction.Parameters.Count < 2 ||
+            direction.Parameters[1] is not Parameter.ListValue coords ||
+            coords.Items.Count < 3)
+        {
+            return default;
+        }
 
-    // ── Math utilities ────────────────────────────────────────────────────
+        var vector = new Vector3D(
+            ToDouble(coords.Items[0]),
+            ToDouble(coords.Items[1]),
+            ToDouble(coords.Items[2]));
+        vector.Normalize();
+        return vector;
+    }
 
     private static Vector3D ComputePolygonNormal(List<Point3D> polygon)
     {
-        // Newell's method: robust for arbitrary planar polygons
-        var n = new Vector3D();
-        int count = polygon.Count;
-        for (int i = 0; i < count; i++)
+        var normal = new Vector3D();
+        for (int i = 0; i < polygon.Count; i++)
         {
-            Point3D cur  = polygon[i];
-            Point3D next = polygon[(i + 1) % count];
-            n.X += (cur.Y - next.Y) * (cur.Z + next.Z);
-            n.Y += (cur.Z - next.Z) * (cur.X + next.X);
-            n.Z += (cur.X - next.X) * (cur.Y + next.Y);
+            Point3D current = polygon[i];
+            Point3D next = polygon[(i + 1) % polygon.Count];
+            normal.X += (current.Y - next.Y) * (current.Z + next.Z);
+            normal.Y += (current.Z - next.Z) * (current.X + next.X);
+            normal.Z += (current.X - next.X) * (current.Y + next.Y);
         }
-        if (n.Length < 1e-10) return new Vector3D(0, 0, 1);
-        n.Normalize();
-        return n;
+
+        if (normal.Length < 1e-10)
+        {
+            return new Vector3D(0, 0, 1);
+        }
+
+        normal.Normalize();
+        return normal;
     }
 
-    private static Point3D Centroid(List<Point3D> pts)
+    private static Point3D Centroid(List<Point3D> points)
     {
-        double x = 0, y = 0, z = 0;
-        foreach (Point3D p in pts) { x += p.X; y += p.Y; z += p.Z; }
-        int n = pts.Count;
-        return new Point3D(x / n, y / n, z / n);
+        double x = 0;
+        double y = 0;
+        double z = 0;
+        foreach (Point3D point in points)
+        {
+            x += point.X;
+            y += point.Y;
+            z += point.Z;
+        }
+
+        return new Point3D(x / points.Count, y / points.Count, z / points.Count);
     }
 
-    private static double AngleOnCircle(Vector3D v, Vector3D xDir, Vector3D yDir) =>
-        Math.Atan2(Vector3D.DotProduct(v, yDir), Vector3D.DotProduct(v, xDir));
+    private static double AngleOnCircle(Vector3D vector, Vector3D xDirection, Vector3D yDirection) =>
+        Math.Atan2(Vector3D.DotProduct(vector, yDirection), Vector3D.DotProduct(vector, xDirection));
 
-    private static double ToDouble(Parameter p) => p switch
+    private static double ToDouble(Parameter parameter) => parameter switch
     {
-        Parameter.RealValue    r => r.Value,
-        Parameter.IntegerValue i => (double)i.Value,
-        _                        => 0.0
+        Parameter.RealValue realValue => realValue.Value,
+        Parameter.IntegerValue integerValue => integerValue.Value,
+        _ => 0.0
     };
 
-    private static List<Point3D> Compact(Point3D?[] pts) =>
-        pts.Where(p => p.HasValue).Select(p => p!.Value).ToList();
+    private static List<Point3D> Compact(Point3D?[] points) =>
+        points.Where(point => point.HasValue).Select(point => point!.Value).ToList();
 
-    private static bool IsNamed(EntityInstance e, string name) =>
-        string.Equals(e.Name, name, StringComparison.OrdinalIgnoreCase);
+    private static bool IsNamed(EntityInstance entity, string name) =>
+        string.Equals(entity.Name, name, StringComparison.OrdinalIgnoreCase);
 }

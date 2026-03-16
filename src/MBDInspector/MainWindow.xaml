@@ -3,93 +3,298 @@
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         xmlns:helix="http://helix-toolkit.org/wpf"
         Title="MBD Inspector"
-        Width="1280" Height="800"
+        Width="1500" Height="940"
+        WindowStartupLocation="CenterScreen"
         AllowDrop="True"
         Drop="Window_Drop"
-        DragOver="Window_DragOver">
+        DragOver="Window_DragOver"
+        Closing="Window_Closing"
+        Loaded="Window_Loaded">
+
+    <Window.Resources>
+        <DataTemplate x:Key="KeyValueTemplate">
+            <Grid Margin="0,2">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="90" />
+                    <ColumnDefinition Width="*" />
+                </Grid.ColumnDefinitions>
+                <TextBlock Text="{Binding Key}" Foreground="#777" FontSize="11" />
+                <TextBlock Grid.Column="1" Text="{Binding Value}" FontSize="11" TextWrapping="Wrap" />
+            </Grid>
+        </DataTemplate>
+    </Window.Resources>
 
     <DockPanel>
-
-        <!-- Menu -->
         <Menu DockPanel.Dock="Top">
             <MenuItem Header="_File">
-                <MenuItem Header="_Open…"   Click="Open_Click"  InputGestureText="Ctrl+O" />
+                <MenuItem Header="_Open…" Click="Open_Click" InputGestureText="Ctrl+O" />
+                <MenuItem Header="_Reload" Click="Reload_Click" InputGestureText="F5" />
+                <MenuItem x:Name="RecentFilesMenu" Header="Recent Files" />
                 <Separator />
-                <MenuItem Header="E_xit"    Click="Exit_Click" />
+                <MenuItem Header="Export _Screenshot…" Click="ExportScreenshot_Click" />
+                <MenuItem Header="Export Summary _JSON…" Click="ExportJson_Click" />
+                <Separator />
+                <MenuItem Header="E_xit" Click="Exit_Click" />
             </MenuItem>
             <MenuItem Header="_View">
-                <MenuItem Header="Fit _All"       Click="FitAll_Click"      InputGestureText="F" />
-                <MenuItem Header="Reset _Camera"  Click="ResetCamera_Click" InputGestureText="Home" />
+                <MenuItem Header="Fit _All" Click="FitAll_Click" InputGestureText="F" />
+                <MenuItem Header="Reset _Camera" Click="ResetCamera_Click" InputGestureText="Home" />
+                <Separator />
+                <MenuItem Header="_Isometric" Click="IsometricView_Click" />
+                <MenuItem Header="_Front" Click="FrontView_Click" />
+                <MenuItem Header="_Right" Click="RightView_Click" />
+                <MenuItem Header="_Top" Click="TopView_Click" />
+                <Separator />
+                <MenuItem x:Name="ProjectionToggleMenu" Header="Use _Orthographic Projection" Click="ToggleProjection_Click" />
             </MenuItem>
         </Menu>
 
-        <!-- Render-mode toolbar -->
         <ToolBar DockPanel.Dock="Top" Background="#F0F0F0">
-            <TextBlock Text="Render:" VerticalAlignment="Center" Margin="4,0,6,0" Foreground="#555"/>
-            <RadioButton x:Name="ModeWireframe"  Content="Wireframe"    GroupName="mode" Margin="2,0"
-                         Checked="RenderMode_Changed" IsChecked="False"/>
-            <RadioButton x:Name="ModeSolid"      Content="Solid"        GroupName="mode" Margin="2,0"
-                         Checked="RenderMode_Changed" IsChecked="False"/>
-            <RadioButton x:Name="ModeSolidEdges" Content="Solid + Edges" GroupName="mode" Margin="2,0"
-                         Checked="RenderMode_Changed" IsChecked="True"/>
-            <Separator/>
-            <TextBlock Text="Opacity:" VerticalAlignment="Center" Margin="4,0,4,0" Foreground="#555"/>
-            <Slider x:Name="OpacitySlider" Width="80" Minimum="0.1" Maximum="1.0" Value="1.0"
-                    VerticalAlignment="Center"
-                    ValueChanged="Opacity_Changed"/>
+            <TextBlock Text="Render:" VerticalAlignment="Center" Margin="4,0,6,0" Foreground="#555" />
+            <RadioButton x:Name="ModeWireframe" Content="Wireframe" GroupName="mode" Margin="2,0" Checked="RenderMode_Changed" IsChecked="False" />
+            <RadioButton x:Name="ModeSolid" Content="Solid" GroupName="mode" Margin="2,0" Checked="RenderMode_Changed" IsChecked="False" />
+            <RadioButton x:Name="ModeSolidEdges" Content="Solid + Edges" GroupName="mode" Margin="2,0" Checked="RenderMode_Changed" IsChecked="True" />
+            <Separator />
+            <TextBlock Text="Opacity:" VerticalAlignment="Center" Margin="4,0,4,0" Foreground="#555" />
+            <Slider x:Name="OpacitySlider" Width="90" Minimum="0.1" Maximum="1.0" Value="1.0" VerticalAlignment="Center" ValueChanged="Opacity_Changed" />
+            <Separator />
+            <Button Content="Hide" Click="HideSelected_Click" Margin="2,0" />
+            <Button Content="Isolate" Click="IsolateSelected_Click" Margin="2,0" />
+            <Button Content="Show All" Click="ShowAll_Click" Margin="2,0" />
+            <Separator />
+            <ToggleButton x:Name="MeasureModeButton" Content="Measure" Margin="2,0" />
+            <TextBlock x:Name="MeasurementText" Text="Pick 2 points" VerticalAlignment="Center" Margin="6,0,0,0" Foreground="#555" />
+            <Separator />
+            <CheckBox x:Name="SectionEnabledCheckBox" Content="Section" VerticalAlignment="Center" Margin="2,0" Checked="SectionControl_Changed" Unchecked="SectionControl_Changed" />
+            <ComboBox x:Name="SectionAxisComboBox" Width="60" Margin="4,0" SelectionChanged="SectionControl_Changed" SelectedIndex="0">
+                <ComboBoxItem Content="X" />
+                <ComboBoxItem Content="Y" />
+                <ComboBoxItem Content="Z" />
+            </ComboBox>
+            <Slider x:Name="SectionSlider" Width="100" Minimum="0" Maximum="100" Value="50" ValueChanged="SectionControl_Changed" />
+            <TextBlock x:Name="SectionText" Text="50%" VerticalAlignment="Center" Margin="4,0,0,0" Foreground="#555" />
+            <Separator />
+            <TextBlock Text="Entity Search:" VerticalAlignment="Center" Margin="8,0,4,0" Foreground="#555" />
+            <TextBox x:Name="EntitySearchBox" Width="220" VerticalAlignment="Center" TextChanged="EntitySearch_TextChanged" />
         </ToolBar>
 
-        <!-- Status bar -->
         <StatusBar DockPanel.Dock="Bottom">
+            <StatusBarItem Width="110">
+                <ProgressBar x:Name="BusyIndicator" Width="90" Height="14" IsIndeterminate="True" Visibility="Collapsed" />
+            </StatusBarItem>
             <StatusBarItem>
-                <TextBlock x:Name="StatusText"
-                           Text="Open a STEP file — Ctrl+O or drag and drop" />
+                <TextBlock x:Name="StatusText" Text="Open a STEP file — Ctrl+O or drag and drop" />
             </StatusBarItem>
         </StatusBar>
 
-        <!-- Main content -->
         <Grid>
             <Grid.ColumnDefinitions>
-                <ColumnDefinition Width="210" MinWidth="120" />
+                <ColumnDefinition Width="430" MinWidth="320" />
                 <ColumnDefinition Width="5" />
                 <ColumnDefinition Width="*" />
             </Grid.ColumnDefinitions>
 
-            <!-- Info panel -->
-            <DockPanel Grid.Column="0" Margin="6,6,4,6">
-                <TextBlock DockPanel.Dock="Top"
-                           Text="File Info"
-                           FontWeight="SemiBold"
-                           Margin="0,0,0,6" />
-                <ItemsControl x:Name="InfoPanel">
-                    <ItemsControl.ItemTemplate>
-                        <DataTemplate>
-                            <Grid Margin="0,2">
-                                <Grid.ColumnDefinitions>
-                                    <ColumnDefinition Width="80" />
-                                    <ColumnDefinition Width="*" />
-                                </Grid.ColumnDefinitions>
-                                <TextBlock Text="{Binding Key}"  Foreground="#888" FontSize="11" />
-                                <TextBlock Grid.Column="1" Text="{Binding Value}"
-                                           FontSize="11" TextWrapping="Wrap" />
-                            </Grid>
-                        </DataTemplate>
-                    </ItemsControl.ItemTemplate>
-                </ItemsControl>
-            </DockPanel>
+            <TabControl Grid.Column="0" Margin="6,6,4,6">
+                <TabItem Header="Summary">
+                    <Grid Margin="6">
+                        <Grid.RowDefinitions>
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="12" />
+                            <RowDefinition Height="*" />
+                        </Grid.RowDefinitions>
 
-            <GridSplitter Grid.Column="1" Width="5"
-                          HorizontalAlignment="Stretch" Background="#DDD" />
+                        <ItemsControl x:Name="InfoPanel" ItemTemplate="{StaticResource KeyValueTemplate}" />
 
-            <!-- 3D viewport -->
-            <helix:HelixViewport3D x:Name="Viewport"
-                                   Grid.Column="2"
-                                   Background="#1A1A1A"
-                                   ShowCoordinateSystem="True"
-                                   ZoomExtentsWhenLoaded="True">
-                <helix:DefaultLights />
-            </helix:HelixViewport3D>
+                        <GroupBox Grid.Row="2" Header="Entity Types">
+                            <ListView x:Name="EntityTypeList">
+                                <ListView.View>
+                                    <GridView>
+                                        <GridViewColumn Header="Type" Width="240" DisplayMemberBinding="{Binding Name}" />
+                                        <GridViewColumn Header="Count" Width="70" DisplayMemberBinding="{Binding Count}" />
+                                    </GridView>
+                                </ListView.View>
+                            </ListView>
+                        </GroupBox>
+                    </Grid>
+                </TabItem>
 
+                <TabItem Header="Entities">
+                    <Grid Margin="6">
+                        <Grid.RowDefinitions>
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="220" />
+                            <RowDefinition Height="12" />
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="150" />
+                            <RowDefinition Height="12" />
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="100" />
+                            <RowDefinition Height="8" />
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="100" />
+                            <RowDefinition Height="8" />
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="110" />
+                        </Grid.RowDefinitions>
+
+                        <TextBlock x:Name="EntityListStatus" Text="No document loaded." Margin="0,0,0,6" Foreground="#666" />
+
+                        <ListBox x:Name="EntityList" Grid.Row="1" SelectionMode="Extended" SelectionChanged="EntityList_SelectionChanged">
+                            <ListBox.ItemTemplate>
+                                <DataTemplate>
+                                    <Border Padding="4,3">
+                                        <StackPanel>
+                                            <TextBlock Text="{Binding Header}" FontWeight="SemiBold" />
+                                            <TextBlock Text="{Binding Preview}" FontSize="11" Foreground="#666" TextWrapping="Wrap" />
+                                        </StackPanel>
+                                    </Border>
+                                </DataTemplate>
+                            </ListBox.ItemTemplate>
+                        </ListBox>
+
+                        <TextBlock x:Name="SelectedEntityTitle" Grid.Row="3" FontWeight="SemiBold" Text="Selected Entity" Margin="0,0,0,6" />
+
+                        <ScrollViewer Grid.Row="4" VerticalScrollBarVisibility="Auto">
+                            <ItemsControl x:Name="EntityDetailPanel" ItemTemplate="{StaticResource KeyValueTemplate}" />
+                        </ScrollViewer>
+
+                        <TextBlock Grid.Row="6" Text="References Out" FontWeight="SemiBold" Margin="0,0,0,6" />
+                        <ListBox x:Name="OutboundReferenceList" Grid.Row="7" SelectionChanged="OutboundReferenceList_SelectionChanged">
+                            <ListBox.ItemTemplate>
+                                <DataTemplate>
+                                    <Border Padding="3">
+                                        <StackPanel>
+                                            <TextBlock Text="{Binding Header}" FontWeight="SemiBold" />
+                                            <TextBlock Text="{Binding Preview}" FontSize="11" Foreground="#666" TextWrapping="Wrap" />
+                                        </StackPanel>
+                                    </Border>
+                                </DataTemplate>
+                            </ListBox.ItemTemplate>
+                        </ListBox>
+
+                        <TextBlock Grid.Row="9" Text="Referenced By" FontWeight="SemiBold" Margin="0,0,0,6" />
+                        <ListBox x:Name="InboundReferenceList" Grid.Row="10" SelectionChanged="InboundReferenceList_SelectionChanged">
+                            <ListBox.ItemTemplate>
+                                <DataTemplate>
+                                    <Border Padding="3">
+                                        <StackPanel>
+                                            <TextBlock Text="{Binding Header}" FontWeight="SemiBold" />
+                                            <TextBlock Text="{Binding Preview}" FontSize="11" Foreground="#666" TextWrapping="Wrap" />
+                                        </StackPanel>
+                                    </Border>
+                                </DataTemplate>
+                            </ListBox.ItemTemplate>
+                        </ListBox>
+
+                        <TextBlock Grid.Row="12" Text="Raw Entity" FontWeight="SemiBold" Margin="0,0,0,6" />
+                        <TextBox x:Name="SelectedEntityRaw" Grid.Row="13" IsReadOnly="True" TextWrapping="Wrap" AcceptsReturn="True" VerticalScrollBarVisibility="Auto" />
+                    </Grid>
+                </TabItem>
+
+                <TabItem Header="Diagnostics">
+                    <Grid Margin="6">
+                        <Grid.RowDefinitions>
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="*" />
+                        </Grid.RowDefinitions>
+
+                        <StackPanel Orientation="Horizontal" Margin="0,0,0,6">
+                            <TextBlock Text="Severity:" VerticalAlignment="Center" Margin="0,0,6,0" />
+                            <ComboBox x:Name="DiagnosticSeverityFilter" Width="120" SelectedIndex="0" SelectionChanged="DiagnosticSeverityFilter_SelectionChanged">
+                                <ComboBoxItem Content="All" />
+                                <ComboBoxItem Content="Error" />
+                                <ComboBoxItem Content="Warning" />
+                                <ComboBoxItem Content="Info" />
+                            </ComboBox>
+                        </StackPanel>
+
+                        <TextBlock x:Name="DiagnosticsStatus" Grid.Row="1" Text="No diagnostics." Margin="0,0,0,6" Foreground="#666" />
+
+                        <DataGrid x:Name="DiagnosticsGrid"
+                                  Grid.Row="2"
+                                  IsReadOnly="True"
+                                  AutoGenerateColumns="False"
+                                  CanUserAddRows="False"
+                                  HeadersVisibility="Column"
+                                  MouseDoubleClick="DiagnosticsGrid_MouseDoubleClick">
+                            <DataGrid.Columns>
+                                <DataGridTextColumn Header="Severity" Binding="{Binding Severity}" Width="90" />
+                                <DataGridTextColumn Header="Line" Binding="{Binding Line}" Width="55" />
+                                <DataGridTextColumn Header="Col" Binding="{Binding Column}" Width="55" />
+                                <DataGridTextColumn Header="Message" Binding="{Binding Message}" Width="*" />
+                            </DataGrid.Columns>
+                        </DataGrid>
+                    </Grid>
+                </TabItem>
+
+                <TabItem Header="Structure">
+                    <Grid Margin="6">
+                        <Grid.RowDefinitions>
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="*" />
+                        </Grid.RowDefinitions>
+
+                        <TextBlock Text="Lightweight product/shape structure browser" Margin="0,0,0,6" Foreground="#666" />
+                        <ListBox x:Name="StructureList" Grid.Row="1" SelectionChanged="StructureList_SelectionChanged">
+                            <ListBox.ItemTemplate>
+                                <DataTemplate>
+                                    <Border Padding="4,3">
+                                        <StackPanel>
+                                            <TextBlock Text="{Binding Header}" FontWeight="SemiBold" />
+                                            <TextBlock Text="{Binding Category}" FontSize="11" Foreground="#666" />
+                                            <TextBlock Text="{Binding Preview}" FontSize="11" Foreground="#666" TextWrapping="Wrap" />
+                                        </StackPanel>
+                                    </Border>
+                                </DataTemplate>
+                            </ListBox.ItemTemplate>
+                        </ListBox>
+                    </Grid>
+                </TabItem>
+
+                <TabItem Header="PMI">
+                    <Grid Margin="6">
+                        <Grid.RowDefinitions>
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="*" />
+                        </Grid.RowDefinitions>
+
+                        <TextBlock Text="Likely PMI, presentation, datum, tolerance, and dimension entities" Margin="0,0,0,6" Foreground="#666" />
+                        <ListBox x:Name="PmiList" Grid.Row="1" SelectionChanged="PmiList_SelectionChanged">
+                            <ListBox.ItemTemplate>
+                                <DataTemplate>
+                                    <Border Padding="4,3">
+                                        <StackPanel>
+                                            <TextBlock Text="{Binding Header}" FontWeight="SemiBold" />
+                                            <TextBlock Text="{Binding Preview}" FontSize="11" Foreground="#666" TextWrapping="Wrap" />
+                                        </StackPanel>
+                                    </Border>
+                                </DataTemplate>
+                            </ListBox.ItemTemplate>
+                        </ListBox>
+                    </Grid>
+                </TabItem>
+            </TabControl>
+
+            <GridSplitter Grid.Column="1" Width="5" HorizontalAlignment="Stretch" Background="#DDD" />
+
+            <Grid Grid.Column="2" Margin="4,6,6,6">
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="*" />
+                    <RowDefinition Height="Auto" />
+                </Grid.RowDefinitions>
+
+                <helix:HelixViewport3D x:Name="Viewport"
+                                       Background="#1A1A1A"
+                                       ShowCoordinateSystem="True"
+                                       ZoomExtentsWhenLoaded="True"
+                                       PreviewMouseLeftButtonDown="Viewport_PreviewMouseLeftButtonDown"
+                                       PreviewMouseLeftButtonUp="Viewport_PreviewMouseLeftButtonUp" />
+
+                <Border Grid.Row="1" Margin="0,8,0,0" Padding="8,6" Background="#F6F6F6" BorderBrush="#DDD" BorderThickness="1">
+                    <TextBlock x:Name="SelectionHint" Text="Select entities, click a face, or double-click diagnostics to navigate." Foreground="#555" />
+                </Border>
+            </Grid>
         </Grid>
     </DockPanel>
 </Window>

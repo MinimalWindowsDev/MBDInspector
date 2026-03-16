@@ -5,14 +5,6 @@ using StepParser.Parser;
 
 namespace MBDInspector;
 
-/// <summary>
-/// Walks a parsed STEP entity graph and extracts line segments for wireframe display.
-///
-/// Strategy (in order of precedence):
-///   1. EDGE_CURVE  → VERTEX_POINT × 2 → CARTESIAN_POINT → XYZ  (full B-rep edge list)
-///   2. POLY_LINE   → sequence of CARTESIAN_POINT refs            (polyline fallback)
-///   3. CARTESIAN_POINT cloud — all points, no connectivity       (last resort)
-/// </summary>
 public static class StepGeometryExtractor
 {
     public readonly record struct Edge(Point3D Start, Point3D End);
@@ -21,83 +13,202 @@ public static class StepGeometryExtractor
     {
         var edges = new List<Edge>();
 
-        // ── Strategy 1: EDGE_CURVE ────────────────────────────────────────
         foreach (var (_, entity) in data)
         {
-            if (!IsNamed(entity, "EDGE_CURVE")) continue;
-            if (entity.Parameters.Count < 3) continue;
+            if (!IsNamed(entity, "EDGE_CURVE") || entity.Parameters.Count < 3)
+            {
+                continue;
+            }
 
             Point3D? start = ResolveVertexPoint(entity.Parameters[1], data);
-            Point3D? end   = ResolveVertexPoint(entity.Parameters[2], data);
+            Point3D? end = ResolveVertexPoint(entity.Parameters[2], data);
             if (start.HasValue && end.HasValue)
-                edges.Add(new Edge(start.Value, end.Value));
-        }
-
-        if (edges.Count > 0) return edges;
-
-        // ── Strategy 2: POLY_LINE ─────────────────────────────────────────
-        foreach (var (_, entity) in data)
-        {
-            if (!IsNamed(entity, "POLY_LINE")) continue;
-            if (entity.Parameters.Count < 2) continue;
-            if (entity.Parameters[1] is not Parameter.ListValue list) continue;
-
-            Point3D? prev = null;
-            foreach (Parameter item in list.Items)
             {
-                Point3D? pt = ResolveCartesianPoint(item, data);
-                if (pt.HasValue && prev.HasValue)
-                    edges.Add(new Edge(prev.Value, pt.Value));
-                if (pt.HasValue)
-                    prev = pt;
+                edges.Add(new Edge(start.Value, end.Value));
             }
         }
 
-        if (edges.Count > 0) return edges;
+        if (edges.Count > 0)
+        {
+            return edges;
+        }
 
-        // ── Strategy 3: CARTESIAN_POINT cloud (no connectivity) ───────────
+        foreach (var (_, entity) in data)
+        {
+            if (IsNamed(entity, "POLY_LINE"))
+            {
+                AppendPolyLineEdges(entity, data, edges);
+            }
+        }
+
+        if (edges.Count > 0)
+        {
+            return edges;
+        }
+
         var points = new List<Point3D>();
         foreach (var (_, entity) in data)
         {
-            if (!IsNamed(entity, "CARTESIAN_POINT")) continue;
-            Point3D? pt = ExtractCoords(entity);
-            if (pt.HasValue) points.Add(pt.Value);
+            if (!IsNamed(entity, "CARTESIAN_POINT"))
+            {
+                continue;
+            }
+
+            Point3D? point = ExtractCoords(entity);
+            if (point.HasValue)
+            {
+                points.Add(point.Value);
+            }
         }
 
-        // Connect consecutive pairs so LinesVisual3D can display them as crosses
         for (int i = 0; i + 1 < points.Count; i += 2)
+        {
             edges.Add(new Edge(points[i], points[i + 1]));
+        }
 
         return edges;
     }
 
-    // ── Helpers ──────────────────────────────────────────────────────────
+    public static IReadOnlyList<Edge> ExtractEntityEdges(
+        int entityId,
+        IReadOnlyDictionary<int, EntityInstance> data)
+    {
+        if (!data.TryGetValue(entityId, out EntityInstance? entity))
+        {
+            return Array.Empty<Edge>();
+        }
+
+        var edges = new List<Edge>();
+        if (IsNamed(entity, "EDGE_CURVE"))
+        {
+            Point3D? start = entity.Parameters.Count > 1 ? ResolveVertexPoint(entity.Parameters[1], data) : null;
+            Point3D? end = entity.Parameters.Count > 2 ? ResolveVertexPoint(entity.Parameters[2], data) : null;
+            if (start.HasValue && end.HasValue)
+            {
+                edges.Add(new Edge(start.Value, end.Value));
+            }
+            return edges;
+        }
+
+        if (IsNamed(entity, "POLY_LINE"))
+        {
+            AppendPolyLineEdges(entity, data, edges);
+            return edges;
+        }
+
+        if (IsNamed(entity, "ADVANCED_FACE") &&
+            StepTessellator.TryExtractFaceOutline(entityId, data, out IReadOnlyList<Point3D> outline))
+        {
+            for (int i = 0; i < outline.Count; i++)
+            {
+                Point3D start = outline[i];
+                Point3D end = outline[(i + 1) % outline.Count];
+                edges.Add(new Edge(start, end));
+            }
+        }
+
+        return edges;
+    }
+
+    public static bool TryGetEntityCenter(
+        int entityId,
+        IReadOnlyDictionary<int, EntityInstance> data,
+        out Point3D center)
+    {
+        center = default;
+        IReadOnlyList<Edge> edges = ExtractEntityEdges(entityId, data);
+        if (edges.Count > 0)
+        {
+            double x = 0;
+            double y = 0;
+            double z = 0;
+            int count = 0;
+            foreach (Edge edge in edges)
+            {
+                x += edge.Start.X + edge.End.X;
+                y += edge.Start.Y + edge.End.Y;
+                z += edge.Start.Z + edge.End.Z;
+                count += 2;
+            }
+
+            center = new Point3D(x / count, y / count, z / count);
+            return true;
+        }
+
+        if (data.TryGetValue(entityId, out EntityInstance? entity) && IsNamed(entity, "CARTESIAN_POINT"))
+        {
+            Point3D? point = ExtractCoords(entity);
+            if (point.HasValue)
+            {
+                center = point.Value;
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private static void AppendPolyLineEdges(
+        EntityInstance entity,
+        IReadOnlyDictionary<int, EntityInstance> data,
+        List<Edge> edges)
+    {
+        if (entity.Parameters.Count < 2 || entity.Parameters[1] is not Parameter.ListValue list)
+        {
+            return;
+        }
+
+        Point3D? previous = null;
+        foreach (Parameter item in list.Items)
+        {
+            Point3D? point = ResolveCartesianPoint(item, data);
+            if (point.HasValue && previous.HasValue)
+            {
+                edges.Add(new Edge(previous.Value, point.Value));
+            }
+
+            if (point.HasValue)
+            {
+                previous = point;
+            }
+        }
+    }
 
     private static Point3D? ResolveVertexPoint(
-        Parameter param, IReadOnlyDictionary<int, EntityInstance> data)
+        Parameter param,
+        IReadOnlyDictionary<int, EntityInstance> data)
     {
-        if (param is not Parameter.EntityReference eref) return null;
-        if (!data.TryGetValue(eref.Id, out EntityInstance? vertex)) return null;
-        if (!IsNamed(vertex, "VERTEX_POINT")) return null;
-        if (vertex.Parameters.Count < 2) return null;
+        if (param is not Parameter.EntityReference entityReference ||
+            !data.TryGetValue(entityReference.Id, out EntityInstance? vertex) ||
+            !IsNamed(vertex, "VERTEX_POINT") ||
+            vertex.Parameters.Count < 2)
+        {
+            return null;
+        }
+
         return ResolveCartesianPoint(vertex.Parameters[1], data);
     }
 
     private static Point3D? ResolveCartesianPoint(
-        Parameter param, IReadOnlyDictionary<int, EntityInstance> data)
+        Parameter param,
+        IReadOnlyDictionary<int, EntityInstance> data)
     {
-        if (param is not Parameter.EntityReference eref) return null;
-        if (!data.TryGetValue(eref.Id, out EntityInstance? entity)) return null;
-        if (!IsNamed(entity, "CARTESIAN_POINT")) return null;
+        if (param is not Parameter.EntityReference entityReference ||
+            !data.TryGetValue(entityReference.Id, out EntityInstance? entity) ||
+            !IsNamed(entity, "CARTESIAN_POINT"))
+        {
+            return null;
+        }
+
         return ExtractCoords(entity);
     }
 
     private static Point3D? ExtractCoords(EntityInstance entity)
     {
-        // CARTESIAN_POINT('name', (x, y, z))
-        if (entity.Parameters.Count < 2) return null;
-        if (entity.Parameters[1] is not Parameter.ListValue coords) return null;
-        if (coords.Items.Count < 2) return null;     // 2-D points are valid in STEP
+        if (entity.Parameters.Count < 2 || entity.Parameters[1] is not Parameter.ListValue coords || coords.Items.Count < 2)
+        {
+            return null;
+        }
 
         double x = ToDouble(coords.Items[0]);
         double y = ToDouble(coords.Items[1]);
@@ -105,11 +216,11 @@ public static class StepGeometryExtractor
         return new Point3D(x, y, z);
     }
 
-    private static double ToDouble(Parameter p) => p switch
+    private static double ToDouble(Parameter parameter) => parameter switch
     {
-        Parameter.RealValue    r => r.Value,
-        Parameter.IntegerValue i => (double)i.Value,
-        _                        => 0.0
+        Parameter.RealValue realValue => realValue.Value,
+        Parameter.IntegerValue integerValue => integerValue.Value,
+        _ => 0.0
     };
 
     private static bool IsNamed(EntityInstance entity, string name) =>
