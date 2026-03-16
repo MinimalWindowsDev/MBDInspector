@@ -1,0 +1,3 @@
+[submodule "submodules/StepParser"]
+	path = submodules/StepParser
+	url = https://github.com/MinimalWindowsDev/StepParser
