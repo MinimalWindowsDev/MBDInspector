@@ -49,6 +49,8 @@ public partial class MainWindow : Window
 
     // ── Core load logic ──────────────────────────────────────────────────
 
+    public void OpenFile(string path) => LoadFile(path);
+
     private void PromptOpen()
     {
         var dlg = new OpenFileDialog
