@@ -57,6 +57,11 @@ internal static class StepDocumentBuilder
 
         BuildReferenceGraph(file.Data, out Dictionary<int, IReadOnlyList<int>> outbound, out Dictionary<int, IReadOnlyList<int>> inbound);
         Dictionary<int, Point3D> centers = BuildEntityCenters(file.Data);
+        Dictionary<int, System.Windows.Media.Color> colorMap = StepColorExtractor.Extract(file.Data);
+        List<FaceMeshItem> faceMeshes = StepTessellator.TessellateFaces(file.Data, colorMap);
+        Dictionary<int, FaceMeshItem> faceMeshLookup = faceMeshes.ToDictionary(item => item.EntityId);
+        IReadOnlyList<StepGeometryExtractor.Edge> allEdges = StepGeometryExtractor.Extract(file.Data);
+        LogFaceBuildFailures(file.Data, faceMeshLookup);
 
         return new LoadedDocument(
             Path.GetFullPath(path),
@@ -68,7 +73,11 @@ internal static class StepDocumentBuilder
             pmiItems,
             outbound,
             inbound,
-            centers);
+            centers,
+            colorMap,
+            faceMeshes,
+            faceMeshLookup,
+            allEdges);
     }
 
     private static void BuildReferenceGraph(
@@ -176,5 +185,29 @@ internal static class StepDocumentBuilder
         ];
 
         return keywords.Any(keyword => name.Contains(keyword, StringComparison.OrdinalIgnoreCase));
+    }
+
+    private static void LogFaceBuildFailures(
+        IReadOnlyDictionary<int, EntityInstance> data,
+        IReadOnlyDictionary<int, FaceMeshItem> faceMeshLookup)
+    {
+        List<StepTessellator.FaceBuildFailure> failures = data.Values
+            .Where(entity => string.Equals(entity.Name, "ADVANCED_FACE", StringComparison.OrdinalIgnoreCase))
+            .Where(entity => !faceMeshLookup.ContainsKey(entity.Id))
+            .Select(entity => StepTessellator.DescribeFaceFailure(entity.Id, data))
+            .Where(failure => failure is not null)
+            .Select(failure => failure!.Value)
+            .ToList();
+
+        if (failures.Count == 0)
+        {
+            return;
+        }
+
+        RuntimeLog.Info($"Skipped {failures.Count} face(s) during tessellation.");
+        foreach (StepTessellator.FaceBuildFailure failure in failures.Take(20))
+        {
+            RuntimeLog.Info($"Skipped face #{failure.FaceId} [{failure.SurfaceType}]: {failure.Reason}");
+        }
     }
 }

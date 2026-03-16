@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Windows.Media.Media3D;
 using StepParser.Parser;
 
@@ -224,5 +225,6 @@ public static class StepGeometryExtractor
     };
 
     private static bool IsNamed(EntityInstance entity, string name) =>
-        string.Equals(entity.Name, name, StringComparison.OrdinalIgnoreCase);
+        string.Equals(entity.Name, name, StringComparison.OrdinalIgnoreCase) ||
+        (entity.Components?.Any(component => string.Equals(component.Name, name, StringComparison.OrdinalIgnoreCase)) ?? false);
 }

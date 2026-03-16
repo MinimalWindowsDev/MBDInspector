@@ -16,7 +16,11 @@ internal sealed record LoadedDocument(
     IReadOnlyList<StructureItem> PmiItems,
     IReadOnlyDictionary<int, IReadOnlyList<int>> OutboundReferences,
     IReadOnlyDictionary<int, IReadOnlyList<int>> InboundReferences,
-    IReadOnlyDictionary<int, Point3D> EntityCenters);
+    IReadOnlyDictionary<int, Point3D> EntityCenters,
+    IReadOnlyDictionary<int, Color> ColorMap,
+    IReadOnlyList<FaceMeshItem> FaceMeshes,
+    IReadOnlyDictionary<int, FaceMeshItem> FaceMeshLookup,
+    IReadOnlyList<StepGeometryExtractor.Edge> AllEdges);
 
 internal sealed record EntityListItem(
     int Id,

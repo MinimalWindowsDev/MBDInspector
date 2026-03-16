@@ -1,146 +1,318 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Windows.Media;
 using StepParser.Parser;
 
 namespace MBDInspector;
 
 /// <summary>
-/// Walks the STEP presentation colour chain and returns a map from
-/// entity ID (typically ADVANCED_FACE or MANIFOLD_SOLID_BREP) → WPF Color.
-///
-/// Chain:
-///   STYLED_ITEM('', (#psa_ids...), #styled_entity_id)
-///   └─ PRESENTATION_STYLE_ASSIGNMENT((#ssu_ids...))
-///      └─ SURFACE_STYLE_USAGE(.BOTH., #surface_side_style_id)
-///         └─ SURFACE_SIDE_STYLE('', (#ssfa_ids...))
-///            └─ SURFACE_STYLE_FILL_AREA(#fill_area_style_id)
-///               └─ FILL_AREA_STYLE('', (#fasc_ids...))
-///                  └─ FILL_AREA_STYLE_COLOUR('', #colour_rgb_id)
-///                     └─ COLOUR_RGB('', r, g, b)   // values in [0..1]
+/// Resolves STEP presentation colours and propagates inherited colours down to faces.
 /// </summary>
 public static class StepColorExtractor
 {
+    private const int MaxColorInheritanceDepth = 8;
+
     public static Dictionary<int, Color> Extract(
+        IReadOnlyDictionary<int, EntityInstance> data)
+    {
+        Dictionary<int, Color> directStyles = ExtractDirectStyles(data);
+        Dictionary<int, IReadOnlyList<int>> inboundReferences = BuildInboundReferences(data);
+        var resolved = new Dictionary<int, Color>(directStyles);
+
+        foreach ((int entityId, EntityInstance entity) in data)
+        {
+            if (!IsNamed(entity, "ADVANCED_FACE") || resolved.ContainsKey(entityId))
+            {
+                continue;
+            }
+
+            if (TryResolveInheritedColor(entityId, directStyles, inboundReferences, out Color color))
+            {
+                resolved[entityId] = color;
+            }
+        }
+
+        return resolved;
+    }
+
+    private static Dictionary<int, Color> ExtractDirectStyles(
         IReadOnlyDictionary<int, EntityInstance> data)
     {
         var map = new Dictionary<int, Color>();
 
-        foreach (var (_, entity) in data)
+        foreach ((_, EntityInstance entity) in data)
         {
-            if (!IsNamed(entity, "STYLED_ITEM")) continue;
-            // params[1] = list of PRESENTATION_STYLE_ASSIGNMENT refs
-            // params[2] = styled entity ref (ADVANCED_FACE, SOLID, etc.)
-            if (entity.Parameters.Count < 3) continue;
-            if (entity.Parameters[2] is not Parameter.EntityReference itemRef) continue;
-            if (entity.Parameters[1] is not Parameter.ListValue psaList) continue;
+            if (!IsNamed(entity, "STYLED_ITEM") || entity.Parameters.Count < 3)
+            {
+                continue;
+            }
+
+            if (entity.Parameters[2] is not Parameter.EntityReference itemRef ||
+                entity.Parameters[1] is not Parameter.ListValue psaList)
+            {
+                continue;
+            }
 
             foreach (Parameter psaRef in psaList.Items)
             {
-                Color? c = ResolvePsa(psaRef, data);
-                if (c.HasValue) { map[itemRef.Id] = c.Value; break; }
+                Color? color = ResolvePsa(psaRef, data);
+                if (color.HasValue)
+                {
+                    map[itemRef.Id] = color.Value;
+                    break;
+                }
             }
         }
 
         return map;
     }
 
-    // ── Chain resolution ──────────────────────────────────────────────────
+    private static bool TryResolveInheritedColor(
+        int entityId,
+        IReadOnlyDictionary<int, Color> directStyles,
+        IReadOnlyDictionary<int, IReadOnlyList<int>> inboundReferences,
+        out Color color)
+    {
+        color = default;
+        var visited = new HashSet<int> { entityId };
+        var queue = new Queue<(int Id, int Depth)>();
+        queue.Enqueue((entityId, 0));
+
+        while (queue.Count > 0)
+        {
+            (int currentId, int depth) = queue.Dequeue();
+            if (depth >= MaxColorInheritanceDepth ||
+                !inboundReferences.TryGetValue(currentId, out IReadOnlyList<int>? referrers))
+            {
+                continue;
+            }
+
+            foreach (int referrerId in referrers)
+            {
+                if (!visited.Add(referrerId))
+                {
+                    continue;
+                }
+
+                if (directStyles.TryGetValue(referrerId, out color))
+                {
+                    return true;
+                }
+
+                queue.Enqueue((referrerId, depth + 1));
+            }
+        }
+
+        return false;
+    }
+
+    private static Dictionary<int, IReadOnlyList<int>> BuildInboundReferences(
+        IReadOnlyDictionary<int, EntityInstance> data)
+    {
+        var inbound = new Dictionary<int, HashSet<int>>();
+
+        foreach ((int sourceId, EntityInstance entity) in data)
+        {
+            foreach (int targetId in EnumerateReferences(entity.Parameters))
+            {
+                if (!inbound.TryGetValue(targetId, out HashSet<int>? referrers))
+                {
+                    referrers = [];
+                    inbound[targetId] = referrers;
+                }
+
+                referrers.Add(sourceId);
+            }
+        }
+
+        return inbound.ToDictionary(
+            pair => pair.Key,
+            pair => (IReadOnlyList<int>)pair.Value.OrderBy(id => id).ToList());
+    }
+
+    private static IEnumerable<int> EnumerateReferences(IEnumerable<Parameter> parameters)
+    {
+        foreach (Parameter parameter in parameters)
+        {
+            switch (parameter)
+            {
+                case Parameter.EntityReference entityReference:
+                    yield return entityReference.Id;
+                    break;
+
+                case Parameter.ListValue listValue:
+                    foreach (int item in EnumerateReferences(listValue.Items))
+                    {
+                        yield return item;
+                    }
+                    break;
+
+                case Parameter.TypedValue typedValue:
+                    foreach (int item in EnumerateReferences([typedValue.Inner]))
+                    {
+                        yield return item;
+                    }
+                    break;
+            }
+        }
+    }
 
     private static Color? ResolvePsa(
-        Parameter param, IReadOnlyDictionary<int, EntityInstance> data)
+        Parameter param,
+        IReadOnlyDictionary<int, EntityInstance> data)
     {
-        // PRESENTATION_STYLE_ASSIGNMENT((#ssu...))
-        // params[0] = list of SURFACE_STYLE_USAGE refs
-        if (!TryGetEntity(param, data, "PRESENTATION_STYLE_ASSIGNMENT", out var psa)) return null;
-        if (psa!.Parameters.Count < 1) return null;
-        if (psa.Parameters[0] is not Parameter.ListValue ssuList) return null;
-
-        foreach (Parameter ssuRef in ssuList.Items)
+        if (!TryGetEntity(param, data, "PRESENTATION_STYLE_ASSIGNMENT", out EntityInstance? psa) ||
+            psa!.Parameters.Count < 1 ||
+            psa.Parameters[0] is not Parameter.ListValue styleList)
         {
-            Color? c = ResolveSsu(ssuRef, data);
-            if (c.HasValue) return c;
+            return null;
         }
+
+        foreach (Parameter styleRef in styleList.Items)
+        {
+            Color? color = ResolveSurfaceStyleUsage(styleRef, data);
+            if (color.HasValue)
+            {
+                return color;
+            }
+        }
+
         return null;
     }
 
-    private static Color? ResolveSsu(
-        Parameter param, IReadOnlyDictionary<int, EntityInstance> data)
+    private static Color? ResolveSurfaceStyleUsage(
+        Parameter param,
+        IReadOnlyDictionary<int, EntityInstance> data)
     {
-        // SURFACE_STYLE_USAGE(.BOTH., #surface_side_style)
-        // params[1] = SURFACE_SIDE_STYLE ref
-        if (!TryGetEntity(param, data, "SURFACE_STYLE_USAGE", out var ssu)) return null;
-        if (ssu!.Parameters.Count < 2) return null;
-        return ResolveSss(ssu.Parameters[1], data);
+        if (!TryGetEntity(param, data, "SURFACE_STYLE_USAGE", out EntityInstance? styleUsage) ||
+            styleUsage!.Parameters.Count < 2)
+        {
+            return null;
+        }
+
+        return ResolveSurfaceSideStyle(styleUsage.Parameters[1], data);
     }
 
-    private static Color? ResolveSss(
-        Parameter param, IReadOnlyDictionary<int, EntityInstance> data)
+    private static Color? ResolveSurfaceSideStyle(
+        Parameter param,
+        IReadOnlyDictionary<int, EntityInstance> data)
     {
-        // SURFACE_SIDE_STYLE('', (#ssfa...))
-        // params[1] = list of SURFACE_STYLE_FILL_AREA refs
-        if (!TryGetEntity(param, data, "SURFACE_SIDE_STYLE", out var sss)) return null;
-        if (sss!.Parameters.Count < 2) return null;
-        if (sss.Parameters[1] is not Parameter.ListValue ssfaList) return null;
-
-        foreach (Parameter ssfaRef in ssfaList.Items)
+        if (!TryGetEntity(param, data, "SURFACE_SIDE_STYLE", out EntityInstance? sideStyle) ||
+            sideStyle!.Parameters.Count < 2 ||
+            sideStyle.Parameters[1] is not Parameter.ListValue fillAreaList)
         {
-            Color? c = ResolveSsfa(ssfaRef, data);
-            if (c.HasValue) return c;
+            return null;
         }
+
+        foreach (Parameter fillAreaRef in fillAreaList.Items)
+        {
+            Color? color = ResolveSurfaceStyleFillArea(fillAreaRef, data);
+            if (color.HasValue)
+            {
+                return color;
+            }
+        }
+
         return null;
     }
 
-    private static Color? ResolveSsfa(
-        Parameter param, IReadOnlyDictionary<int, EntityInstance> data)
+    private static Color? ResolveSurfaceStyleFillArea(
+        Parameter param,
+        IReadOnlyDictionary<int, EntityInstance> data)
     {
-        // SURFACE_STYLE_FILL_AREA(#fill_area_style)
-        // params[0] = FILL_AREA_STYLE ref
-        if (!TryGetEntity(param, data, "SURFACE_STYLE_FILL_AREA", out var ssfa)) return null;
-        if (ssfa!.Parameters.Count < 1) return null;
-        return ResolveFas(ssfa.Parameters[0], data);
+        if (!TryGetEntity(param, data, "SURFACE_STYLE_FILL_AREA", out EntityInstance? fillArea) ||
+            fillArea!.Parameters.Count < 1)
+        {
+            return null;
+        }
+
+        return ResolveFillAreaStyle(fillArea.Parameters[0], data);
     }
 
-    private static Color? ResolveFas(
-        Parameter param, IReadOnlyDictionary<int, EntityInstance> data)
+    private static Color? ResolveFillAreaStyle(
+        Parameter param,
+        IReadOnlyDictionary<int, EntityInstance> data)
     {
-        // FILL_AREA_STYLE('', (#fasc...))
-        // params[1] = list containing FILL_AREA_STYLE_COLOUR refs
-        if (!TryGetEntity(param, data, "FILL_AREA_STYLE", out var fas)) return null;
-        if (fas!.Parameters.Count < 2) return null;
-        if (fas.Parameters[1] is not Parameter.ListValue fascList) return null;
-
-        foreach (Parameter fascRef in fascList.Items)
+        if (!TryGetEntity(param, data, "FILL_AREA_STYLE", out EntityInstance? style) ||
+            style!.Parameters.Count < 2 ||
+            style.Parameters[1] is not Parameter.ListValue styleItems)
         {
-            Color? c = ResolveFasc(fascRef, data);
-            if (c.HasValue) return c;
+            return null;
         }
+
+        foreach (Parameter styleItem in styleItems.Items)
+        {
+            Color? color = ResolveFillAreaStyleColour(styleItem, data);
+            if (color.HasValue)
+            {
+                return color;
+            }
+        }
+
         return null;
     }
 
-    private static Color? ResolveFasc(
-        Parameter param, IReadOnlyDictionary<int, EntityInstance> data)
+    private static Color? ResolveFillAreaStyleColour(
+        Parameter param,
+        IReadOnlyDictionary<int, EntityInstance> data)
     {
-        // FILL_AREA_STYLE_COLOUR('', #colour_rgb)
-        // params[1] = COLOUR_RGB ref
-        if (!TryGetEntity(param, data, "FILL_AREA_STYLE_COLOUR", out var fasc)) return null;
-        if (fasc!.Parameters.Count < 2) return null;
-        return ResolveRgb(fasc.Parameters[1], data);
+        if (!TryGetEntity(param, data, "FILL_AREA_STYLE_COLOUR", out EntityInstance? colourStyle) ||
+            colourStyle!.Parameters.Count < 2)
+        {
+            return null;
+        }
+
+        return ResolveColourDefinition(colourStyle.Parameters[1], data);
     }
 
-    private static Color? ResolveRgb(
-        Parameter param, IReadOnlyDictionary<int, EntityInstance> data)
+    private static Color? ResolveColourDefinition(
+        Parameter param,
+        IReadOnlyDictionary<int, EntityInstance> data)
     {
-        // COLOUR_RGB('', r, g, b)   values in [0..1]
-        if (!TryGetEntity(param, data, "COLOUR_RGB", out var rgb)) return null;
-        if (rgb!.Parameters.Count < 4) return null;
-        byte r = ToByte(rgb.Parameters[1]);
-        byte g = ToByte(rgb.Parameters[2]);
-        byte b = ToByte(rgb.Parameters[3]);
-        return Color.FromRgb(r, g, b);
+        if (param is not Parameter.EntityReference entityReference ||
+            !data.TryGetValue(entityReference.Id, out EntityInstance? colorEntity))
+        {
+            return null;
+        }
+
+        if (IsNamed(colorEntity, "COLOUR_RGB"))
+        {
+            if (colorEntity.Parameters.Count < 4)
+            {
+                return null;
+            }
+
+            return Color.FromRgb(
+                ToByte(colorEntity.Parameters[1]),
+                ToByte(colorEntity.Parameters[2]),
+                ToByte(colorEntity.Parameters[3]));
+        }
+
+        if ((IsNamed(colorEntity, "DRAUGHTING_PRE_DEFINED_COLOUR") ||
+             IsNamed(colorEntity, "PRE_DEFINED_COLOUR")) &&
+            colorEntity.Parameters.Count >= 1 &&
+            colorEntity.Parameters[0] is Parameter.StringValue namedColor)
+        {
+            return ResolveNamedColor(namedColor.Value);
+        }
+
+        return null;
     }
 
-    // ── Helpers ───────────────────────────────────────────────────────────
+    private static Color? ResolveNamedColor(string value) => value.Trim().ToLowerInvariant() switch
+    {
+        "black" => Colors.Black,
+        "white" => Colors.White,
+        "red" => Colors.Red,
+        "green" => Colors.Green,
+        "blue" => Colors.Blue,
+        "yellow" => Colors.Yellow,
+        "cyan" => Colors.Cyan,
+        "magenta" => Colors.Magenta,
+        "grey" or "gray" => Colors.Gray,
+        _ => null
+    };
 
     private static bool TryGetEntity(
         Parameter param,
@@ -149,22 +321,28 @@ public static class StepColorExtractor
         out EntityInstance? entity)
     {
         entity = null;
-        if (param is not Parameter.EntityReference eref) return false;
-        if (!data.TryGetValue(eref.Id, out entity)) return false;
+        if (param is not Parameter.EntityReference entityReference ||
+            !data.TryGetValue(entityReference.Id, out entity))
+        {
+            return false;
+        }
+
         return IsNamed(entity, expectedName);
     }
 
-    private static byte ToByte(Parameter p)
+    private static byte ToByte(Parameter parameter)
     {
-        double v = p switch
+        double value = parameter switch
         {
-            Parameter.RealValue    r => r.Value,
-            Parameter.IntegerValue i => (double)i.Value,
-            _                        => 0.0
+            Parameter.RealValue realValue => realValue.Value,
+            Parameter.IntegerValue integerValue => integerValue.Value,
+            _ => 0.0
         };
-        return (byte)Math.Clamp(v * 255.0, 0, 255);
+
+        return (byte)Math.Clamp(Math.Round(value * 255.0), 0, 255);
     }
 
-    private static bool IsNamed(EntityInstance e, string name) =>
-        string.Equals(e.Name, name, StringComparison.OrdinalIgnoreCase);
+    private static bool IsNamed(EntityInstance entity, string name) =>
+        string.Equals(entity.Name, name, StringComparison.OrdinalIgnoreCase) ||
+        (entity.Components?.Any(component => string.Equals(component.Name, name, StringComparison.OrdinalIgnoreCase)) ?? false);
 }

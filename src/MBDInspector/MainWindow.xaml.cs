@@ -437,7 +437,7 @@ public partial class MainWindow : Window
             _document = document;
             _loadedPath = document.Path;
             _allEntities = document.Entities;
-            _colorMap = StepColorExtractor.Extract(document.File.Data);
+            _colorMap = new Dictionary<int, Color>(document.ColorMap);
             _entityLookup.Clear();
             foreach (EntityListItem item in document.Entities)
             {
@@ -451,7 +451,8 @@ public partial class MainWindow : Window
             PmiList.ItemsSource = document.PmiItems;
             ApplyEntityFilter();
             ApplyDiagnosticFilter();
-            Render(document);
+            Render(document, true);
+            RuntimeLog.Info($"Loaded file successfully: {path} ({document.FaceMeshes.Count} face meshes, {document.AllEdges.Count} edges)");
 
             Title = $"MBD Inspector — {Path.GetFileName(path)}";
         }
@@ -467,7 +468,7 @@ public partial class MainWindow : Window
         }
     }
 
-    private void Render(LoadedDocument document)
+    private void Render(LoadedDocument document, bool zoomExtents)
     {
         ClearSceneVisuals();
 
@@ -477,7 +478,7 @@ public partial class MainWindow : Window
 
         if (showSolid)
         {
-            foreach (FaceMeshItem faceMesh in StepTessellator.TessellateFaces(document.File.Data, _colorMap))
+            foreach (FaceMeshItem faceMesh in document.FaceMeshes)
             {
                 if (!IsEntityVisible(faceMesh.EntityId) || faceMesh.Mesh.Positions.Count == 0)
                 {
@@ -499,7 +500,7 @@ public partial class MainWindow : Window
 
         if (showEdges && _isolatedEntityIds is null && _hiddenEntityIds.Count == 0)
         {
-            IReadOnlyList<StepGeometryExtractor.Edge> edges = StepGeometryExtractor.Extract(document.File.Data);
+            IReadOnlyList<StepGeometryExtractor.Edge> edges = document.AllEdges;
             if (edges.Count > 0)
             {
                 Viewport.Children.Add(CreateLineVisual(
@@ -511,7 +512,10 @@ public partial class MainWindow : Window
 
         UpdateSelectionVisual();
         UpdateMeasurementVisual();
-        Viewport.ZoomExtents();
+        if (zoomExtents)
+        {
+            Viewport.ZoomExtents();
+        }
 
         int faceCount = document.File.Data.Values.Count(entity =>
             string.Equals(entity.Name, "ADVANCED_FACE", StringComparison.OrdinalIgnoreCase));
@@ -742,7 +746,20 @@ public partial class MainWindow : Window
         var allEdges = new List<StepGeometryExtractor.Edge>();
         foreach (int entityId in selectedIds)
         {
-            if (StepTessellator.TryTessellateFace(entityId, _document.File.Data, out MeshGeometry3D? faceMesh))
+            if (_document.FaceMeshLookup.TryGetValue(entityId, out FaceMeshItem? cachedFaceMesh) &&
+                cachedFaceMesh is not null)
+            {
+                var brush = new SolidColorBrush(Color.FromArgb(110, SelectionColor.R, SelectionColor.G, SelectionColor.B));
+                var material = new DiffuseMaterial(brush);
+                _selectionModel = new GeometryModel3D
+                {
+                    Geometry = cachedFaceMesh.Mesh,
+                    Material = material,
+                    BackMaterial = material
+                };
+                Viewport.Children.Add(new ModelVisual3D { Content = _selectionModel });
+            }
+            else if (StepTessellator.TryTessellateFace(entityId, _document.File.Data, out MeshGeometry3D? faceMesh))
             {
                 var brush = new SolidColorBrush(Color.FromArgb(110, SelectionColor.R, SelectionColor.G, SelectionColor.B));
                 var material = new DiffuseMaterial(brush);
@@ -1040,7 +1057,7 @@ public partial class MainWindow : Window
     {
         if (_document is not null)
         {
-            Render(_document);
+            Render(_document, false);
         }
     }
 
