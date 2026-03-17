@@ -113,6 +113,20 @@ public sealed class StepTessellatorTests
         Assert.NotEmpty(mesh!.TriangleIndices);
     }
 
+    [Fact]
+    public void TryTessellateFace_SupportsSurfaceOfRevolution()
+    {
+        IReadOnlyDictionary<int, EntityInstance> data = CreateSurfaceOfRevolutionFaceData();
+
+        bool success = StepTessellator.TryTessellateFace(600, data, out MeshGeometry3D? mesh);
+
+        Assert.True(success);
+        Assert.NotNull(mesh);
+        Assert.NotEmpty(mesh!.Positions);
+        Assert.All(mesh.Normals, normal => Assert.InRange(normal.Length, 0.999, 1.001));
+    }
+
+
     private static IReadOnlyDictionary<int, EntityInstance> CreatePlanarFaceData() => new Dictionary<int, EntityInstance>
     {
         [1] = CartesianPoint(1, 0, 0, 0),
@@ -385,4 +399,39 @@ public sealed class StepTessellatorTests
                 new Parameter.EnumValue("UNSPECIFIED")
             ],
             null);
+    private static IReadOnlyDictionary<int, EntityInstance> CreateSurfaceOfRevolutionFaceData() => new Dictionary<int, EntityInstance>
+    {
+        [1] = CartesianPoint(1, 2, 0, 0),
+        [2] = CartesianPoint(2, 2, 0, 4),
+        [3] = CartesianPoint(3, 0, 2, 4),
+        [4] = CartesianPoint(4, 0, 2, 0),
+        [10] = VertexPoint(10, 1),
+        [11] = VertexPoint(11, 2),
+        [12] = VertexPoint(12, 3),
+        [13] = VertexPoint(13, 4),
+        [20] = new(20, "LINE", [new Parameter.StringValue(""), new Parameter.EntityReference(1), new Parameter.UnsetValue()], null),
+        [21] = new(21, "LINE", [new Parameter.StringValue(""), new Parameter.EntityReference(2), new Parameter.UnsetValue()], null),
+        [22] = new(22, "LINE", [new Parameter.StringValue(""), new Parameter.EntityReference(3), new Parameter.UnsetValue()], null),
+        [23] = new(23, "LINE", [new Parameter.StringValue(""), new Parameter.EntityReference(4), new Parameter.UnsetValue()], null),
+        [24] = new(24, "POLY_LINE", [new Parameter.StringValue(""), new Parameter.ListValue([new Parameter.EntityReference(1), new Parameter.EntityReference(2)])], null),
+        [30] = EdgeCurve(30, 10, 11, 20),
+        [31] = EdgeCurve(31, 11, 12, 21),
+        [32] = EdgeCurve(32, 12, 13, 22),
+        [33] = EdgeCurve(33, 13, 10, 23),
+        [40] = OrientedEdge(40, 30),
+        [41] = OrientedEdge(41, 31),
+        [42] = OrientedEdge(42, 32),
+        [43] = OrientedEdge(43, 33),
+        [50] = EdgeLoop(50, 40, 41, 42, 43),
+        [60] = FaceOuterBound(60, 50),
+        [70] = Direction(70, 0, 0, 1),
+        [71] = Direction(71, 1, 0, 0),
+        [72] = Axis2Placement(72, 1, 70, 71),
+        [73] = new(73, "SURFACE_OF_REVOLUTION", [new Parameter.StringValue(""), new Parameter.EntityReference(72), new Parameter.EntityReference(24)], null),
+        [600] = AdvancedFace(600, 60, 73)
+    };
 }
+
+
+
+

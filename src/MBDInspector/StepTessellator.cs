@@ -45,6 +45,13 @@ public static class StepTessellator
         double MajorRadius,
         double MinorRadius);
 
+    private readonly record struct RevolutionSurface(
+        Point3D Origin,
+        Vector3D Axis,
+        Vector3D XDirection,
+        Vector3D YDirection,
+        IReadOnlyList<Point> ProfilePoints);
+
     internal readonly record struct FaceBuildFailure(
         int FaceId,
         string SurfaceType,
@@ -95,12 +102,14 @@ public static class StepTessellator
 
     internal static List<FaceMeshItem> TessellateFaces(
         IReadOnlyDictionary<int, EntityInstance> data,
-        IReadOnlyDictionary<int, Color>? colorMap = null)
+        IReadOnlyDictionary<int, Color>? colorMap = null,
+        IReadOnlyDictionary<int, double>? opacityMap = null)
     {
         var result = new List<FaceMeshItem>();
         foreach ((int faceId, EntityInstance entity) in data)
         {
-            if (!TryBuildFaceGeometry(entity, data, out List<Point3D>? positions, out List<int>? indices, out List<Vector3D>? normals, out _))
+            if (!IsNamed(entity, "ADVANCED_FACE") ||
+                !TryBuildFaceGeometry(entity, data, out List<Point3D>? positions, out List<int>? indices, out List<Vector3D>? normals, out _))
             {
                 continue;
             }
@@ -108,11 +117,15 @@ public static class StepTessellator
             Color? faceColor = colorMap is not null && colorMap.TryGetValue(faceId, out Color color)
                 ? color
                 : null;
+            double opacity = opacityMap is not null && opacityMap.TryGetValue(faceId, out double resolvedOpacity)
+                ? resolvedOpacity
+                : 1.0;
 
             result.Add(new FaceMeshItem(
                 faceId,
                 CreateFrozenMesh(positions!, indices!, normals!),
-                faceColor));
+                faceColor,
+                opacity));
         }
 
         return result;
@@ -336,6 +349,11 @@ public static class StepTessellator
             return TryBuildSphericalFaceGeometry(polygon, sphere, sameSense, positions, indices, normals);
         }
 
+        if (TryResolveRevolutionSurface(surfaceParameter, polygon, data, out RevolutionSurface revolution))
+        {
+            return TryBuildRevolutionFaceGeometry(revolution, sameSense, positions, indices, normals);
+        }
+
         if (TryResolveToroidalSurface(surfaceParameter, data, out TorusSurface torus))
         {
             return TryBuildToroidalFaceGeometry(polygon, torus, sameSense, positions, indices, normals);
@@ -426,6 +444,48 @@ public static class StepTessellator
             Point b = uvPolygon[triangleIndices[i + 1]];
             Point c = uvPolygon[triangleIndices[i + 2]];
             AddToroidalTriangle(a, b, c, torus, sameSense, targetEdgeLength, 0, positions, indices, normals);
+        }
+
+        return positions.Count > 0;
+    }
+
+    private static bool TryBuildRevolutionFaceGeometry(
+        RevolutionSurface revolution,
+        bool sameSense,
+        List<Point3D> positions,
+        List<int> indices,
+        List<Vector3D> normals)
+    {
+        if (revolution.ProfilePoints.Count < 2)
+        {
+            return false;
+        }
+
+        int angleSamples = Math.Max(12, CircleSamples);
+        IReadOnlyList<Point> profile = revolution.ProfilePoints;
+        for (int profileIndex = 0; profileIndex < profile.Count - 1; profileIndex++)
+        {
+            Point currentProfile = profile[profileIndex];
+            Point nextProfile = profile[profileIndex + 1];
+
+            for (int angleIndex = 0; angleIndex < angleSamples; angleIndex++)
+            {
+                double angle0 = (2.0 * Math.PI * angleIndex) / angleSamples;
+                double angle1 = (2.0 * Math.PI * (angleIndex + 1)) / angleSamples;
+
+                Point3D p00 = PointOnRevolution(currentProfile, angle0, revolution);
+                Point3D p01 = PointOnRevolution(currentProfile, angle1, revolution);
+                Point3D p10 = PointOnRevolution(nextProfile, angle0, revolution);
+                Point3D p11 = PointOnRevolution(nextProfile, angle1, revolution);
+
+                Vector3D n00 = NormalOnRevolution(profile, profileIndex, angle0, revolution, sameSense);
+                Vector3D n01 = NormalOnRevolution(profile, profileIndex, angle1, revolution, sameSense);
+                Vector3D n10 = NormalOnRevolution(profile, profileIndex + 1, angle0, revolution, sameSense);
+                Vector3D n11 = NormalOnRevolution(profile, profileIndex + 1, angle1, revolution, sameSense);
+
+                AddTriangle(p00, p10, p11, n00, n10, n11, n00 + n10 + n11, positions, indices, normals);
+                AddTriangle(p00, p11, p01, n00, n11, n01, n00 + n11 + n01, positions, indices, normals);
+            }
         }
 
         return positions.Count > 0;
@@ -785,6 +845,47 @@ public static class StepTessellator
         Normalize(ref yDirection);
         sphere = new SphereSurface(origin, axis, xDirection, yDirection, radius);
         return radius > 0;
+    }
+
+    private static bool TryResolveRevolutionSurface(
+        Parameter surfaceParam,
+        IReadOnlyList<Point3D> polygon,
+        IReadOnlyDictionary<int, EntityInstance> data,
+        out RevolutionSurface revolution)
+    {
+        revolution = default;
+        if (surfaceParam is not Parameter.EntityReference entityReference ||
+            !data.TryGetValue(entityReference.Id, out EntityInstance? surface) ||
+            !IsNamed(surface, "SURFACE_OF_REVOLUTION") ||
+            surface.Parameters.Count < 3)
+        {
+            return false;
+        }
+
+        (Point3D origin, Vector3D axis, Vector3D xDirection) = ResolveAxisPlacement(surface.Parameters[1], data);
+        if (axis.Length < 1e-10)
+        {
+            return false;
+        }
+
+        if (xDirection.Length < 1e-10)
+        {
+            xDirection = CreatePerpendicular(axis);
+        }
+
+        Vector3D yDirection = Vector3D.CrossProduct(axis, xDirection);
+        Normalize(ref axis);
+        Normalize(ref xDirection);
+        Normalize(ref yDirection);
+
+        List<Point> profilePoints = ResolveRevolutionProfile(surface.Parameters[2], origin, axis, xDirection, yDirection, polygon, data);
+        if (profilePoints.Count < 2)
+        {
+            return false;
+        }
+
+        revolution = new RevolutionSurface(origin, axis, xDirection, yDirection, profilePoints);
+        return true;
     }
 
     private static bool TryResolveToroidalSurface(
@@ -1606,6 +1707,130 @@ public static class StepTessellator
         return IsNamed(entity, componentName) ? entity.Parameters : null;
     }
 
+    private static (Point3D Origin, Vector3D Axis, Vector3D XDirection) ResolveAxisPlacement(
+        Parameter parameter,
+        IReadOnlyDictionary<int, EntityInstance> data)
+    {
+        if (parameter is not Parameter.EntityReference entityReference ||
+            !data.TryGetValue(entityReference.Id, out EntityInstance? axisPlacement))
+        {
+            return default;
+        }
+
+        if (IsNamed(axisPlacement, "AXIS1_PLACEMENT"))
+        {
+            Point3D? origin = axisPlacement.Parameters.Count > 1 ? ResolveCartesianPointParam(axisPlacement.Parameters[1], data) : null;
+            Vector3D axis = axisPlacement.Parameters.Count > 2 ? ResolveDirectionParam(axisPlacement.Parameters[2], data) : new Vector3D(0, 0, 1);
+            if (axis.Length < 1e-10)
+            {
+                axis = new Vector3D(0, 0, 1);
+            }
+
+            Vector3D xDirection = CreatePerpendicular(axis);
+            return (origin ?? default, axis, xDirection);
+        }
+
+        return ResolveAxis2(parameter, data);
+    }
+
+    private static List<Point> ResolveRevolutionProfile(
+        Parameter parameter,
+        Point3D origin,
+        Vector3D axis,
+        Vector3D xDirection,
+        Vector3D yDirection,
+        IReadOnlyList<Point3D> polygon,
+        IReadOnlyDictionary<int, EntityInstance> data)
+    {
+        var profilePoints = new List<Point>();
+        if (parameter is Parameter.EntityReference entityReference &&
+            data.TryGetValue(entityReference.Id, out EntityInstance? profileCurve))
+        {
+            foreach (Point3D point in SampleCurve(profileCurve, null, null, data))
+            {
+                profilePoints.Add(ToRevolutionProfilePoint(point, origin, axis, xDirection, yDirection));
+            }
+        }
+
+        if (profilePoints.Count < 2)
+        {
+            foreach (Point3D point in polygon)
+            {
+                profilePoints.Add(ToRevolutionProfilePoint(point, origin, axis, xDirection, yDirection));
+            }
+        }
+
+        return CompactProfilePoints(profilePoints);
+    }
+
+    private static Point ToRevolutionProfilePoint(
+        Point3D point,
+        Point3D origin,
+        Vector3D axis,
+        Vector3D xDirection,
+        Vector3D yDirection)
+    {
+        Vector3D offset = point - origin;
+        double axisDistance = Vector3D.DotProduct(offset, axis);
+        Vector3D radial = offset - (axis * axisDistance);
+        double radius = Math.Sqrt(
+            Math.Pow(Vector3D.DotProduct(radial, xDirection), 2) +
+            Math.Pow(Vector3D.DotProduct(radial, yDirection), 2));
+        return new Point(radius, axisDistance);
+    }
+
+    private static List<Point> CompactProfilePoints(IReadOnlyList<Point> points)
+    {
+        var result = new List<Point>(points.Count);
+        foreach (Point point in points)
+        {
+            if (result.Count == 0 || (point - result[^1]).Length > 1e-6)
+            {
+                result.Add(point);
+            }
+        }
+
+        return result.Count >= 2 ? result : [];
+    }
+
+    private static Point3D PointOnRevolution(Point profilePoint, double angle, RevolutionSurface revolution)
+    {
+        Vector3D radialDirection =
+            (revolution.XDirection * Math.Cos(angle)) +
+            (revolution.YDirection * Math.Sin(angle));
+
+        return revolution.Origin + (revolution.Axis * profilePoint.Y) + (radialDirection * profilePoint.X);
+    }
+
+    private static Vector3D NormalOnRevolution(
+        IReadOnlyList<Point> profile,
+        int index,
+        double angle,
+        RevolutionSurface revolution,
+        bool sameSense)
+    {
+        Point current = profile[index];
+        Point previous = index > 0 ? profile[index - 1] : current;
+        Point next = index + 1 < profile.Count ? profile[index + 1] : current;
+        Vector tangent = next - previous;
+
+        double radialSlope = Math.Abs(tangent.X) < 1e-10 && Math.Abs(tangent.Y) < 1e-10 ? 0.0 : tangent.X;
+        double axisSlope = Math.Abs(tangent.X) < 1e-10 && Math.Abs(tangent.Y) < 1e-10 ? 1.0 : tangent.Y;
+
+        Vector3D radialDirection =
+            (revolution.XDirection * Math.Cos(angle)) +
+            (revolution.YDirection * Math.Sin(angle));
+
+        Vector3D normal = (radialDirection * axisSlope) - (revolution.Axis * radialSlope);
+        if (normal.Length < 1e-10)
+        {
+            normal = radialDirection;
+        }
+
+        Normalize(ref normal);
+        return sameSense ? normal : -normal;
+    }
+
     private static (Point3D Center, Vector3D Z, Vector3D X) ResolveAxis2(
         Parameter param,
         IReadOnlyDictionary<int, EntityInstance> data)
@@ -1792,3 +2017,6 @@ public static class StepTessellator
         string.Equals(entity.Name, name, StringComparison.OrdinalIgnoreCase) ||
         (entity.Components?.Any(component => string.Equals(component.Name, name, StringComparison.OrdinalIgnoreCase)) ?? false);
 }
+
+
+

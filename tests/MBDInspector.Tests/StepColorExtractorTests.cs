@@ -66,4 +66,27 @@ public sealed class StepColorExtractorTests
         Assert.True(brush.Color.G > 0);
         Assert.True(brush.Color.B > 0);
     }
+
+    [Fact]
+    public void Extract_ReturnsReducedOpacity_WhenTransparencyPresent()
+    {
+        IReadOnlyDictionary<int, EntityInstance> data = new Dictionary<int, EntityInstance>
+        {
+            [1] = new(1, "ADVANCED_FACE", [new Parameter.StringValue(""), new Parameter.ListValue([]), new Parameter.UnsetValue(), new Parameter.EnumValue("T")], null),
+            [2] = new(2, "STYLED_ITEM", [new Parameter.StringValue(""), new Parameter.ListValue([new Parameter.EntityReference(3)]), new Parameter.EntityReference(1)], null),
+            [3] = new(3, "PRESENTATION_STYLE_ASSIGNMENT", [new Parameter.ListValue([new Parameter.EntityReference(4)])], null),
+            [4] = new(4, "SURFACE_STYLE_USAGE", [new Parameter.EnumValue("BOTH"), new Parameter.EntityReference(5)], null),
+            [5] = new(5, "SURFACE_SIDE_STYLE", [new Parameter.StringValue(""), new Parameter.ListValue([new Parameter.EntityReference(6), new Parameter.EntityReference(10)])], null),
+            [6] = new(6, "SURFACE_STYLE_FILL_AREA", [new Parameter.EntityReference(7)], null),
+            [7] = new(7, "FILL_AREA_STYLE", [new Parameter.StringValue(""), new Parameter.ListValue([new Parameter.EntityReference(8)])], null),
+            [8] = new(8, "FILL_AREA_STYLE_COLOUR", [new Parameter.StringValue(""), new Parameter.EntityReference(9)], null),
+            [9] = new(9, "COLOUR_RGB", [new Parameter.StringValue(""), new Parameter.RealValue(0.1), new Parameter.RealValue(0.2), new Parameter.RealValue(0.3)], null),
+            [10] = new(10, "SURFACE_STYLE_TRANSPARENCY", [new Parameter.RealValue(0.5)], null)
+        };
+
+        Dictionary<int, StepColorExtractor.AppearanceInfo> appearances = StepColorExtractor.ExtractAppearance(data);
+
+        Assert.True(appearances.ContainsKey(1));
+        Assert.Equal(0.5, appearances[1].Opacity, 3);
+    }
 }

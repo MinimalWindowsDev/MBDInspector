@@ -17,6 +17,7 @@ using StepParser.Diagnostics;
 using StepParser.Parser;
 
 namespace MBDInspector;
+
 public partial class MainWindow : Window
 {
     private static readonly Regex EntityIdRegex = new(@"#(?<id>\d+)", RegexOptions.Compiled);
@@ -204,7 +205,7 @@ public partial class MainWindow : Window
 
     private void PmiList_SelectionChanged(object sender, SelectionChangedEventArgs e)
     {
-        if (PmiList.SelectedItem is StructureItem item)
+        if (PmiList.SelectedItem is PmiDetail item)
         {
             NavigateToEntity(item.Id);
             PmiList.SelectedItem = null;
@@ -453,7 +454,7 @@ public partial class MainWindow : Window
             UpdateInfoPanel(document);
             UpdateEntityTypePanel(document.EntityTypes);
             StructureList.ItemsSource = document.StructureItems;
-            PmiList.ItemsSource = document.PmiItems;
+            PmiList.ItemsSource = document.PmiDetails;
             ApplyEntityFilter();
             ApplyDiagnosticFilter();
             Render(document, true);
@@ -490,7 +491,7 @@ public partial class MainWindow : Window
                     continue;
                 }
 
-                Material material = MakeMaterial(faceMesh.FaceColor, 1.0, opacity);
+                Material material = MakeMaterial(faceMesh.FaceColor, faceMesh.Opacity, opacity);
                 var model = new GeometryModel3D
                 {
                     Geometry = faceMesh.Mesh,
@@ -618,6 +619,7 @@ public partial class MainWindow : Window
             KV("Size", $"{new FileInfo(document.Path).Length / 1024.0:F1} KB"),
             KV("Schema", Shorten(document.File.FileSchema)),
             KV("Edition", document.File.DetectedEdition?.ToString() ?? "—"),
+            KV("Units", document.LengthUnit),
             KV("Entities", document.File.Data.Count.ToString()),
             KV("Faces", faceCount.ToString()),
             KV("Errors", errors.ToString()),
@@ -879,7 +881,8 @@ public partial class MainWindow : Window
 
         if (_measurementPoints.Count == 1)
         {
-            MeasurementText.Text = "Point 1 captured";
+            Point3D point = _measurementPoints[0];
+            MeasurementText.Text = $"Point 1: ({point.X:F3}, {point.Y:F3}, {point.Z:F3}) {_document?.LengthUnit ?? "mm"}";
             return;
         }
 
@@ -888,7 +891,7 @@ public partial class MainWindow : Window
         Viewport.Children.Add(_measurementLines);
 
         double distance = (_measurementPoints[1] - _measurementPoints[0]).Length;
-        MeasurementText.Text = $"Distance: {distance:F3}";
+        MeasurementText.Text = $"Distance: {distance:F3} {_document?.LengthUnit ?? "mm"}";
     }
 
     private void RemoveMeasurementVisuals()
@@ -984,6 +987,7 @@ public partial class MainWindow : Window
             KV("File", "—"),
             KV("Schema", "—"),
             KV("Edition", "—"),
+            KV("Units", "—"),
             KV("Entities", "0"),
             KV("Errors", "0"),
             KV("Warnings", "0")
@@ -991,7 +995,7 @@ public partial class MainWindow : Window
 
         EntityTypeList.ItemsSource = Array.Empty<EntityTypeItem>();
         StructureList.ItemsSource = Array.Empty<StructureItem>();
-        PmiList.ItemsSource = Array.Empty<StructureItem>();
+        PmiList.ItemsSource = Array.Empty<PmiDetail>();
         DiagnosticsGrid.ItemsSource = Array.Empty<DiagnosticItem>();
         EntityList.ItemsSource = Array.Empty<EntityListItem>();
         EntityDetailPanel.ItemsSource = Array.Empty<KeyValuePair<string, string>>();
@@ -1278,3 +1282,8 @@ public partial class MainWindow : Window
         return brace > 0 ? schema[..brace].Trim() : schema;
     }
 }
+
+
+
+
+

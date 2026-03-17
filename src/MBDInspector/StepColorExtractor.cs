@@ -12,34 +12,44 @@ namespace MBDInspector;
 public static class StepColorExtractor
 {
     private const int MaxColorInheritanceDepth = 8;
+    internal readonly record struct AppearanceInfo(Color? Color, double Opacity);
 
     public static Dictionary<int, Color> Extract(
         IReadOnlyDictionary<int, EntityInstance> data)
     {
-        Dictionary<int, Color> directStyles = ExtractDirectStyles(data);
+        Dictionary<int, AppearanceInfo> appearances = ExtractAppearance(data);
+        return appearances
+            .Where(pair => pair.Value.Color.HasValue)
+            .ToDictionary(pair => pair.Key, pair => pair.Value.Color!.Value);
+    }
+
+    internal static Dictionary<int, AppearanceInfo> ExtractAppearance(
+        IReadOnlyDictionary<int, EntityInstance> data)
+    {
+        Dictionary<int, AppearanceInfo> directStyles = ExtractDirectStyles(data);
         Dictionary<int, IReadOnlyList<int>> inboundReferences = BuildInboundReferences(data);
-        var resolved = new Dictionary<int, Color>(directStyles);
+        var appearanceMap = new Dictionary<int, AppearanceInfo>(directStyles);
 
         foreach ((int entityId, EntityInstance entity) in data)
         {
-            if (!IsNamed(entity, "ADVANCED_FACE") || resolved.ContainsKey(entityId))
+            if (!IsNamed(entity, "ADVANCED_FACE") || appearanceMap.ContainsKey(entityId))
             {
                 continue;
             }
 
-            if (TryResolveInheritedColor(entityId, directStyles, inboundReferences, out Color color))
+            if (TryResolveInheritedAppearance(entityId, directStyles, inboundReferences, out AppearanceInfo appearance))
             {
-                resolved[entityId] = color;
+                appearanceMap[entityId] = appearance;
             }
         }
 
-        return resolved;
+        return appearanceMap;
     }
 
-    private static Dictionary<int, Color> ExtractDirectStyles(
+    private static Dictionary<int, AppearanceInfo> ExtractDirectStyles(
         IReadOnlyDictionary<int, EntityInstance> data)
     {
-        var map = new Dictionary<int, Color>();
+        var map = new Dictionary<int, AppearanceInfo>();
 
         foreach ((_, EntityInstance entity) in data)
         {
@@ -56,10 +66,10 @@ public static class StepColorExtractor
 
             foreach (Parameter psaRef in psaList.Items)
             {
-                Color? color = ResolvePsa(psaRef, data);
-                if (color.HasValue)
+                AppearanceInfo? appearance = ResolvePsa(psaRef, data);
+                if (appearance.HasValue)
                 {
-                    map[itemRef.Id] = color.Value;
+                    map[itemRef.Id] = appearance.Value;
                     break;
                 }
             }
@@ -68,13 +78,13 @@ public static class StepColorExtractor
         return map;
     }
 
-    private static bool TryResolveInheritedColor(
+    private static bool TryResolveInheritedAppearance(
         int entityId,
-        IReadOnlyDictionary<int, Color> directStyles,
+        IReadOnlyDictionary<int, AppearanceInfo> directStyles,
         IReadOnlyDictionary<int, IReadOnlyList<int>> inboundReferences,
-        out Color color)
+        out AppearanceInfo appearance)
     {
-        color = default;
+        appearance = default;
         var visited = new HashSet<int> { entityId };
         var queue = new Queue<(int Id, int Depth)>();
         queue.Enqueue((entityId, 0));
@@ -95,7 +105,7 @@ public static class StepColorExtractor
                     continue;
                 }
 
-                if (directStyles.TryGetValue(referrerId, out color))
+                if (directStyles.TryGetValue(referrerId, out appearance))
                 {
                     return true;
                 }
@@ -158,7 +168,7 @@ public static class StepColorExtractor
         }
     }
 
-    private static Color? ResolvePsa(
+    private static AppearanceInfo? ResolvePsa(
         Parameter param,
         IReadOnlyDictionary<int, EntityInstance> data)
     {
@@ -171,17 +181,17 @@ public static class StepColorExtractor
 
         foreach (Parameter styleRef in styleList.Items)
         {
-            Color? color = ResolveSurfaceStyleUsage(styleRef, data);
-            if (color.HasValue)
+            AppearanceInfo? appearance = ResolveSurfaceStyleUsage(styleRef, data);
+            if (appearance.HasValue)
             {
-                return color;
+                return appearance;
             }
         }
 
         return null;
     }
 
-    private static Color? ResolveSurfaceStyleUsage(
+    private static AppearanceInfo? ResolveSurfaceStyleUsage(
         Parameter param,
         IReadOnlyDictionary<int, EntityInstance> data)
     {
@@ -194,7 +204,7 @@ public static class StepColorExtractor
         return ResolveSurfaceSideStyle(styleUsage.Parameters[1], data);
     }
 
-    private static Color? ResolveSurfaceSideStyle(
+    private static AppearanceInfo? ResolveSurfaceSideStyle(
         Parameter param,
         IReadOnlyDictionary<int, EntityInstance> data)
     {
@@ -205,16 +215,24 @@ public static class StepColorExtractor
             return null;
         }
 
+        Color? color = null;
+        double opacity = 1.0;
         foreach (Parameter fillAreaRef in fillAreaList.Items)
         {
-            Color? color = ResolveSurfaceStyleFillArea(fillAreaRef, data);
-            if (color.HasValue)
+            if (ResolveSurfaceStyleFillArea(fillAreaRef, data) is Color resolvedColor)
             {
-                return color;
+                color = resolvedColor;
+            }
+
+            if (ResolveSurfaceStyleTransparency(fillAreaRef, data) is double resolvedOpacity)
+            {
+                opacity = resolvedOpacity;
             }
         }
 
-        return null;
+        return color.HasValue || opacity < 1.0
+            ? new AppearanceInfo(color, opacity)
+            : null;
     }
 
     private static Color? ResolveSurfaceStyleFillArea(
@@ -228,6 +246,20 @@ public static class StepColorExtractor
         }
 
         return ResolveFillAreaStyle(fillArea.Parameters[0], data);
+    }
+
+    private static double? ResolveSurfaceStyleTransparency(
+        Parameter param,
+        IReadOnlyDictionary<int, EntityInstance> data)
+    {
+        if (!TryGetEntity(param, data, "SURFACE_STYLE_TRANSPARENCY", out EntityInstance? transparency) ||
+            transparency!.Parameters.Count < 1)
+        {
+            return null;
+        }
+
+        double transparencyValue = ToDouble(transparency.Parameters[0]);
+        return Math.Clamp(1.0 - transparencyValue, 0.0, 1.0);
     }
 
     private static Color? ResolveFillAreaStyle(
@@ -330,6 +362,12 @@ public static class StepColorExtractor
         return IsNamed(entity, expectedName);
     }
 
+    private static double ToDouble(Parameter parameter) => parameter switch
+    {
+        Parameter.RealValue realValue => realValue.Value,
+        Parameter.IntegerValue integerValue => integerValue.Value,
+        _ => 0.0
+    };
     private static byte ToByte(Parameter parameter)
     {
         double value = parameter switch
@@ -346,3 +384,4 @@ public static class StepColorExtractor
         string.Equals(entity.Name, name, StringComparison.OrdinalIgnoreCase) ||
         (entity.Components?.Any(component => string.Equals(component.Name, name, StringComparison.OrdinalIgnoreCase)) ?? false);
 }
+

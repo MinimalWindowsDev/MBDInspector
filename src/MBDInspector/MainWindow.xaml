@@ -259,18 +259,18 @@
                         </Grid.RowDefinitions>
 
                         <TextBlock Text="Likely PMI, presentation, datum, tolerance, and dimension entities" Margin="0,0,0,6" Foreground="#666" />
-                        <ListBox x:Name="PmiList" Grid.Row="1" SelectionChanged="PmiList_SelectionChanged">
-                            <ListBox.ItemTemplate>
-                                <DataTemplate>
-                                    <Border Padding="4,3">
-                                        <StackPanel>
-                                            <TextBlock Text="{Binding Header}" FontWeight="SemiBold" />
-                                            <TextBlock Text="{Binding Preview}" FontSize="11" Foreground="#666" TextWrapping="Wrap" />
-                                        </StackPanel>
-                                    </Border>
-                                </DataTemplate>
-                            </ListBox.ItemTemplate>
-                        </ListBox>
+                        <DataGrid x:Name="PmiList"
+                                  Grid.Row="1"
+                                  AutoGenerateColumns="False"
+                                  CanUserAddRows="False"
+                                  IsReadOnly="True"
+                                  SelectionChanged="PmiList_SelectionChanged">
+                            <DataGrid.Columns>
+                                <DataGridTextColumn Header="Type" Binding="{Binding Type}" Width="160" />
+                                <DataGridTextColumn Header="Value" Binding="{Binding Value}" Width="*" />
+                                <DataGridTextColumn Header="Tolerance" Binding="{Binding Tolerance}" Width="140" />
+                            </DataGrid.Columns>
+                        </DataGrid>
                     </Grid>
                 </TabItem>
             </TabControl>

@@ -9,15 +9,18 @@ namespace MBDInspector;
 internal sealed record LoadedDocument(
     string Path,
     StepFile File,
+    string LengthUnit,
     IReadOnlyList<ParseDiagnostic> Diagnostics,
     IReadOnlyList<EntityListItem> Entities,
     IReadOnlyList<EntityTypeItem> EntityTypes,
     IReadOnlyList<StructureItem> StructureItems,
     IReadOnlyList<StructureItem> PmiItems,
+    IReadOnlyList<PmiDetail> PmiDetails,
     IReadOnlyDictionary<int, IReadOnlyList<int>> OutboundReferences,
     IReadOnlyDictionary<int, IReadOnlyList<int>> InboundReferences,
     IReadOnlyDictionary<int, Point3D> EntityCenters,
     IReadOnlyDictionary<int, Color> ColorMap,
+    IReadOnlyDictionary<int, double> OpacityMap,
     IReadOnlyList<FaceMeshItem> FaceMeshes,
     IReadOnlyDictionary<int, FaceMeshItem> FaceMeshLookup,
     IReadOnlyList<StepGeometryExtractor.Edge> AllEdges);
@@ -47,13 +50,20 @@ internal sealed record EntityReferenceItem(
 internal sealed record FaceMeshItem(
     int EntityId,
     MeshGeometry3D Mesh,
-    Color? FaceColor);
+    Color? FaceColor,
+    double Opacity);
 
 internal sealed record StructureItem(
     int Id,
     string Header,
     string Preview,
     string Category);
+
+internal sealed record PmiDetail(
+    int Id,
+    string Type,
+    string Value,
+    string? Tolerance);
 
 internal sealed record AppSettings(
     IReadOnlyList<string> RecentFiles,
@@ -72,3 +82,4 @@ internal sealed record CameraBookmark(
     double UpDirectionY,
     double UpDirectionZ,
     double? Width);
+
