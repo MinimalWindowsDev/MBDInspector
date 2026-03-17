@@ -105,30 +105,37 @@ public static class StepTessellator
         IReadOnlyDictionary<int, Color>? colorMap = null,
         IReadOnlyDictionary<int, double>? opacityMap = null)
     {
-        var result = new List<FaceMeshItem>();
-        foreach ((int faceId, EntityInstance entity) in data)
+        return data
+            .Where(pair => IsNamed(pair.Value, "ADVANCED_FACE"))
+            .OrderBy(pair => pair.Key)
+            .AsParallel()
+            .AsOrdered()
+            .Select(pair => TryCreateFaceMeshItem(pair.Key, pair.Value, data, colorMap, opacityMap))
+            .Where(item => item is not null)
+            .Select(item => item!)
+            .ToList();
+    }
+
+    private static FaceMeshItem? TryCreateFaceMeshItem(
+        int faceId,
+        EntityInstance entity,
+        IReadOnlyDictionary<int, EntityInstance> data,
+        IReadOnlyDictionary<int, Color>? colorMap,
+        IReadOnlyDictionary<int, double>? opacityMap)
+    {
+        if (!TryBuildFaceGeometry(entity, data, out List<Point3D>? positions, out List<int>? indices, out List<Vector3D>? normals, out _))
         {
-            if (!IsNamed(entity, "ADVANCED_FACE") ||
-                !TryBuildFaceGeometry(entity, data, out List<Point3D>? positions, out List<int>? indices, out List<Vector3D>? normals, out _))
-            {
-                continue;
-            }
-
-            Color? faceColor = colorMap is not null && colorMap.TryGetValue(faceId, out Color color)
-                ? color
-                : null;
-            double opacity = opacityMap is not null && opacityMap.TryGetValue(faceId, out double resolvedOpacity)
-                ? resolvedOpacity
-                : 1.0;
-
-            result.Add(new FaceMeshItem(
-                faceId,
-                CreateFrozenMesh(positions!, indices!, normals!),
-                faceColor,
-                opacity));
+            return null;
         }
 
-        return result;
+        Color? faceColor = colorMap is not null && colorMap.TryGetValue(faceId, out Color color)
+            ? color
+            : null;
+        double opacity = opacityMap is not null && opacityMap.TryGetValue(faceId, out double resolvedOpacity)
+            ? resolvedOpacity
+            : 1.0;
+
+        return new FaceMeshItem(faceId, CreateFrozenMesh(positions!, indices!, normals!), faceColor, opacity);
     }
 
     public static bool TryTessellateFace(
@@ -695,8 +702,17 @@ public static class StepTessellator
         List<int> indices,
         List<Vector3D> normals)
     {
-        if (!TryProjectPolygonToPlane(polygon, desiredNormal, out List<Point> projected) ||
-            !TryTriangulatePolygon(projected, out List<int> triangleIndices))
+        if (!TryProjectPolygonToPlane(polygon, desiredNormal, out List<Point> projected))
+        {
+            return false;
+        }
+
+        if (projected.Count > 64)
+        {
+            return TryBuildFanTriangulation(polygon, desiredNormal, positions, indices, normals);
+        }
+
+        if (!TryTriangulatePolygon(projected, out List<int> triangleIndices))
         {
             return false;
         }
@@ -2017,6 +2033,5 @@ public static class StepTessellator
         string.Equals(entity.Name, name, StringComparison.OrdinalIgnoreCase) ||
         (entity.Components?.Any(component => string.Equals(component.Name, name, StringComparison.OrdinalIgnoreCase)) ?? false);
 }
-
 
 

@@ -68,6 +68,12 @@ internal static class StepDocumentBuilder
             .ToDictionary(pair => pair.Key, pair => pair.Value.Opacity);
         List<FaceMeshItem> faceMeshes = StepTessellator.TessellateFaces(file.Data, colorMap, opacityMap);
         Dictionary<int, FaceMeshItem> faceMeshLookup = faceMeshes.ToDictionary(item => item.EntityId);
+        IReadOnlyDictionary<int, IReadOnlyList<StepGeometryExtractor.Edge>> entityEdges = file.Data
+            .Where(pair => IsNamed(pair.Value, "ADVANCED_FACE"))
+            .OrderBy(pair => pair.Key)
+            .ToDictionary(
+                pair => pair.Key,
+                pair => (IReadOnlyList<StepGeometryExtractor.Edge>)StepGeometryExtractor.ExtractEntityEdges(pair.Key, file.Data));
         IReadOnlyList<StepGeometryExtractor.Edge> allEdges = StepGeometryExtractor.Extract(file.Data);
         LogFaceBuildFailures(file.Data, faceMeshLookup);
 
@@ -88,6 +94,7 @@ internal static class StepDocumentBuilder
             opacityMap,
             faceMeshes,
             faceMeshLookup,
+            entityEdges,
             allEdges);
     }
 

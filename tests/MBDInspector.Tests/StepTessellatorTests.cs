@@ -1,5 +1,7 @@
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
+using System.Linq;
 using System.Windows.Media.Media3D;
 using StepParser.Parser;
 using Xunit;
@@ -126,7 +128,31 @@ public sealed class StepTessellatorTests
         Assert.All(mesh.Normals, normal => Assert.InRange(normal.Length, 0.999, 1.001));
     }
 
+    [Fact]
+    public void TessellateFaces_IsOrderDeterministic()
+    {
+        IReadOnlyDictionary<int, EntityInstance> data = CreateMultipleFaceData();
 
+        List<int> first = StepTessellator.TessellateFaces(data).Select(item => item.EntityId).ToList();
+        List<int> second = StepTessellator.TessellateFaces(data).Select(item => item.EntityId).ToList();
+
+        Assert.Equal(first, second);
+    }
+
+    [Fact]
+    public void TryTessellateFace_HandlesHighVertexCountPolygon()
+    {
+        IReadOnlyDictionary<int, EntityInstance> data = CreateHighVertexPlanarFaceData(200);
+        Stopwatch stopwatch = Stopwatch.StartNew();
+
+        bool success = StepTessellator.TryTessellateFace(900, data, out MeshGeometry3D? mesh);
+
+        stopwatch.Stop();
+        Assert.True(success);
+        Assert.NotNull(mesh);
+        Assert.NotEmpty(mesh!.TriangleIndices);
+        Assert.True(stopwatch.Elapsed < TimeSpan.FromMilliseconds(500), $"Tessellation took {stopwatch.Elapsed.TotalMilliseconds:F1} ms.");
+    }
     private static IReadOnlyDictionary<int, EntityInstance> CreatePlanarFaceData() => new Dictionary<int, EntityInstance>
     {
         [1] = CartesianPoint(1, 0, 0, 0),
@@ -430,8 +456,78 @@ public sealed class StepTessellatorTests
         [73] = new(73, "SURFACE_OF_REVOLUTION", [new Parameter.StringValue(""), new Parameter.EntityReference(72), new Parameter.EntityReference(24)], null),
         [600] = AdvancedFace(600, 60, 73)
     };
-}
+    private static IReadOnlyDictionary<int, EntityInstance> CreateMultipleFaceData()
+    {
+        var result = new Dictionary<int, EntityInstance>();
+        foreach (KeyValuePair<int, EntityInstance> pair in CreatePlanarFaceData())
+        {
+            result[pair.Key] = pair.Value;
+        }
 
+        foreach (KeyValuePair<int, EntityInstance> pair in CreateSurfaceOfRevolutionFaceData())
+        {
+            result[pair.Key + 1000] = OffsetEntity(pair.Value, 1000);
+        }
+
+        return result;
+    }
+
+    private static IReadOnlyDictionary<int, EntityInstance> CreateHighVertexPlanarFaceData(int vertexCount)
+    {
+        var data = new Dictionary<int, EntityInstance>();
+        for (int index = 0; index < vertexCount; index++)
+        {
+            double angle = (2.0 * Math.PI * index) / vertexCount;
+            int pointId = index + 1;
+            int vertexId = 1000 + index;
+            data[pointId] = CartesianPoint(pointId, Math.Cos(angle) * 10.0, Math.Sin(angle) * 10.0, 0.0);
+            data[vertexId] = VertexPoint(vertexId, pointId);
+        }
+
+        var loopReferences = new List<Parameter>();
+        for (int index = 0; index < vertexCount; index++)
+        {
+            int startPointId = index + 1;
+            int endPointId = ((index + 1) % vertexCount) + 1;
+            int startVertexId = 1000 + index;
+            int endVertexId = 1000 + ((index + 1) % vertexCount);
+            int lineId = 2000 + index;
+            int edgeCurveId = 3000 + index;
+            int orientedEdgeId = 4000 + index;
+
+            data[lineId] = new EntityInstance(lineId, "LINE", [new Parameter.StringValue(""), new Parameter.EntityReference(startPointId), new Parameter.UnsetValue()], null);
+            data[edgeCurveId] = EdgeCurve(edgeCurveId, startVertexId, endVertexId, lineId);
+            data[orientedEdgeId] = OrientedEdge(orientedEdgeId, edgeCurveId);
+            loopReferences.Add(new Parameter.EntityReference(orientedEdgeId));
+        }
+
+        data[8000] = new EntityInstance(8000, "EDGE_LOOP", [new Parameter.StringValue(""), new Parameter.ListValue(loopReferences)], null);
+        data[8001] = FaceOuterBound(8001, 8000);
+        data[8002] = Direction(8002, 0, 0, 1);
+        data[8003] = Direction(8003, 1, 0, 0);
+        data[8004] = Axis2Placement(8004, 1, 8002, 8003);
+        data[8005] = new EntityInstance(8005, "PLANE", [new Parameter.StringValue(""), new Parameter.EntityReference(8004)], null);
+        data[900] = AdvancedFace(900, 8001, 8005);
+        return data;
+    }
+
+    private static EntityInstance OffsetEntity(EntityInstance entity, int offset)
+    {
+        IReadOnlyList<Parameter> parameters = entity.Parameters.Select(parameter => OffsetParameter(parameter, offset)).ToList();
+        IReadOnlyList<EntityComponent>? components = entity.Components?
+            .Select(component => new EntityComponent(component.Name, component.Parameters.Select(parameter => OffsetParameter(parameter, offset)).ToList()))
+            .ToList();
+        return new EntityInstance(entity.Id + offset, entity.Name, parameters, components);
+    }
+
+    private static Parameter OffsetParameter(Parameter parameter, int offset) => parameter switch
+    {
+        Parameter.EntityReference entityReference => new Parameter.EntityReference(entityReference.Id + offset),
+        Parameter.ListValue listValue => new Parameter.ListValue(listValue.Items.Select(item => OffsetParameter(item, offset)).ToList()),
+        Parameter.TypedValue typedValue => new Parameter.TypedValue(typedValue.TypeName, OffsetParameter(typedValue.Inner, offset)),
+        _ => parameter
+    };
+}
 
 
 

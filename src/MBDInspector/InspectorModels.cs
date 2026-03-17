@@ -23,6 +23,7 @@ internal sealed record LoadedDocument(
     IReadOnlyDictionary<int, double> OpacityMap,
     IReadOnlyList<FaceMeshItem> FaceMeshes,
     IReadOnlyDictionary<int, FaceMeshItem> FaceMeshLookup,
+    IReadOnlyDictionary<int, IReadOnlyList<StepGeometryExtractor.Edge>> EntityEdges,
     IReadOnlyList<StepGeometryExtractor.Edge> AllEdges);
 
 internal sealed record EntityListItem(

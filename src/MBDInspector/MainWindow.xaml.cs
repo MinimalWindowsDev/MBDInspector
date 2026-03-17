@@ -11,6 +11,7 @@ using System.Windows.Input;
 using System.Windows.Media;
 using System.Windows.Media.Imaging;
 using System.Windows.Media.Media3D;
+using System.Windows.Threading;
 using HelixToolkit.Wpf;
 using Microsoft.Win32;
 using StepParser.Diagnostics;
@@ -41,6 +42,7 @@ public partial class MainWindow : Window
     private PointsVisual3D? _measurementMarkers;
     private bool _suppressReferenceSelection;
     private bool _isLoaded;
+    private DispatcherTimer? _searchDebounce;
     private Point? _viewportMouseDownPoint;
 
     private static readonly Color DefaultFaceColor = Color.FromRgb(180, 192, 210);
@@ -147,7 +149,27 @@ public partial class MainWindow : Window
 
     private void RenderMode_Changed(object sender, RoutedEventArgs e) => RerenderIfLoaded();
     private void Opacity_Changed(object sender, RoutedPropertyChangedEventArgs<double> e) => RerenderIfLoaded();
-    private void EntitySearch_TextChanged(object sender, TextChangedEventArgs e) => ApplyEntityFilter();
+    private void EntitySearch_TextChanged(object sender, TextChangedEventArgs e)
+    {
+        _searchDebounce ??= new DispatcherTimer
+        {
+            Interval = TimeSpan.FromMilliseconds(150)
+        };
+        _searchDebounce.Tick -= SearchDebounce_Tick;
+        _searchDebounce.Tick += SearchDebounce_Tick;
+        _searchDebounce.Stop();
+        _searchDebounce.Start();
+    }
+    private void SearchDebounce_Tick(object? sender, EventArgs e)
+    {
+        if (_searchDebounce is null)
+        {
+            return;
+        }
+
+        _searchDebounce.Stop();
+        ApplyEntityFilter();
+    }
     private void DiagnosticSeverityFilter_SelectionChanged(object sender, SelectionChangedEventArgs e) => ApplyDiagnosticFilter();
     private void SectionControl_Changed(object sender, RoutedEventArgs e)
     {
@@ -779,7 +801,14 @@ public partial class MainWindow : Window
                 Viewport.Children.Add(new ModelVisual3D { Content = _selectionModel });
             }
 
-            allEdges.AddRange(StepGeometryExtractor.ExtractEntityEdges(entityId, _document.File.Data));
+            if (_document.EntityEdges.TryGetValue(entityId, out IReadOnlyList<StepGeometryExtractor.Edge>? cachedEdges) && cachedEdges is not null)
+            {
+                allEdges.AddRange(cachedEdges);
+            }
+            else
+            {
+                allEdges.AddRange(StepGeometryExtractor.ExtractEntityEdges(entityId, _document.File.Data));
+            }
         }
 
         if (allEdges.Count > 0)
@@ -1282,7 +1311,6 @@ public partial class MainWindow : Window
         return brace > 0 ? schema[..brace].Trim() : schema;
     }
 }
-
 
 
 
